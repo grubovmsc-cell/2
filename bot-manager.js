@@ -33,9 +33,12 @@ async function startBot() {
     botUsername = me.username || '';
     // ВАЖНО: bot.launch() в Telegraf 4 резолвится только при остановке бота,
     // поэтому await здесь заблокировал бы запуск HTTP-сервера навсегда.
-    bot.launch().catch((err) => {
+    // Если polling всё же упал — поднимаем бота заново, чтобы не ждать редеплоя
+    const launch = () => bot.launch().catch((err) => {
       console.error('[manager] ❌ Bot polling stopped:', err.message);
+      setTimeout(launch, 5000);
     });
+    launch();
     notifier.setBot(bot);
     console.log(`[manager] ✅ Бот запущен: @${botUsername}`);
   } catch (err) {

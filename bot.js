@@ -39,6 +39,14 @@ function createBot(token) {
   const bot = new Telegraf(token);
   bot.use(session({ defaultSession: DEFAULT_SESSION }));
 
+  // Общий перехватчик: без него любая необработанная ошибка в хендлере
+  // останавливает polling и бот перестаёт отвечать всем пользователям
+  bot.catch((err, ctx) => {
+    console.error('[bot] Ошибка при обработке', ctx?.updateType, '—', err.message);
+    ctx?.reply?.('⚠️ Что-то пошло не так. Попробуйте ещё раз или наберите /menu.')
+      .catch(() => {});
+  });
+
   bot.start(async (ctx) => {
     const tgId       = ctx.from.id;
     const tgUsername = ctx.from.username;
@@ -201,8 +209,9 @@ function createBot(token) {
       const vehicleId = data.split(':')[1];
       session.pendingTicket.vehicleId = vehicleId;
       session.step = 'new_ticket_desc';
-      await ctx.editMessageText('✏️ Опишите проблему или задачу (текстом):',
-        { reply_markup: { remove_keyboard: true } });
+      // editMessageText принимает только inline-клавиатуру, поэтому просто
+      // убираем кнопки, передавая пустой inline_keyboard
+      await ctx.editMessageText('✏️ Опишите проблему или задачу (текстом):');
       return;
     }
 
@@ -217,8 +226,7 @@ function createBot(token) {
         tachograph: '📟 Серийный номер тахографа',
         briefing_date: '📋 Дата последнего инструктажа (ДД.ММ.ГГГГ)',
       };
-      await ctx.editMessageText(`${labels[field] || field}\n\nВведите новое значение:`,
-        { reply_markup: { remove_keyboard: true } });
+      await ctx.editMessageText(`${labels[field] || field}\n\nВведите новое значение:`);
       return;
     }
 

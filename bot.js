@@ -47,6 +47,25 @@ function createBot(token) {
       .catch(() => {});
   });
 
+  // Сессия хранится в памяти и теряется при перезапуске сервера, но привязка
+  // к водителю живёт в БД — восстанавливаем её сами, не переспрашивая e-mail.
+  bot.use(async (ctx, next) => {
+    const s = ctx.session;
+    if (s && !s.userId && ctx.from && !ctx.from.is_bot) {
+      try {
+        let user = await db.getUserByTelegramId(ctx.from.id);
+        if (!user && ctx.from.username) {
+          user = await db.getUserByTelegramUsername(ctx.from.username);
+          if (user) await db.linkTelegram(user.id, ctx.from.id, ctx.from.username);
+        }
+        if (user) { s.userId = user.id; s.companyId = user.company_id; }
+      } catch (err) {
+        console.error('[bot] session restore error:', err.message);
+      }
+    }
+    return next();
+  });
+
   bot.start(async (ctx) => {
     const tgId       = ctx.from.id;
     const tgUsername = ctx.from.username;
@@ -93,6 +112,14 @@ function createBot(token) {
     const tgId    = ctx.from.id;
     const session = ctx.session;
 
+    // Нажатие кнопки меню всегда прерывает текущий диалог, иначе «Мой профиль»
+    // улетал бы в проверку e-mail или в описание заявки
+    const MENU_BUTTONS = ['📝 Новая заявка', '📋 Мои заявки', '👤 Мой профиль', 'ℹ️ Помощь'];
+    if (MENU_BUTTONS.includes(text)) {
+      session.step = null;
+      session.editingField = null;
+    }
+
     if (session.step === 'await_email') {
       const email = text.toLowerCase();
       try {
@@ -110,9 +137,14 @@ function createBot(token) {
       return;
     }
 
+    // Сюда попадаем, только если ни по Telegram ID, ни по нику водителя не нашли
     if (!session.userId) {
       session.step = 'await_email';
-      await ctx.reply('Введите ваш рабочий e-mail для привязки аккаунта:');
+      await ctx.reply(
+        `Не нашёл вас в базе.\n\n` +
+        `Проверьте у диспетчера, что в вашей карточке водителя указан Telegram-ник ` +
+        `@${ctx.from.username || '—'}, либо введите рабочий e-mail для привязки:`
+      );
       return;
     }
 

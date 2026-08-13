@@ -153,11 +153,17 @@ async function startBot() {
   }
   try {
     bot = createBot(BOT_TOKEN);
-    await bot.launch();
+    // Проверяем токен и узнаём юзернейм до запуска polling
     const me = await bot.telegram.getMe();
     botUsername = me.username || '';
+    // ВАЖНО: bot.launch() в Telegraf 4 резолвится только при остановке бота,
+    // поэтому await здесь заблокировал бы запуск HTTP-сервера навсегда.
+    bot.launch().catch((err) => {
+      console.error('[manager] ❌ Bot polling stopped:', err.message);
+    });
     console.log(`[manager] ✅ Бот запущен: @${botUsername}`);
   } catch (err) {
+    bot = null;
     console.error('[manager] ❌ Failed to start bot:', err.message);
   }
 }

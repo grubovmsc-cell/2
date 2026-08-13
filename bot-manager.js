@@ -3,139 +3,14 @@
 require('dotenv').config();
 const express = require('express');
 const db      = require('./db');
-const { createBot } = require('./bot');
+const { createBot }  = require('./bot');
+const { initSchema } = require('./schema');
+const { router: apiRouter } = require('./api');
+const notifier = require('./notifier');
 
 const NOTIFY_PORT   = parseInt(process.env.NOTIFY_PORT   || '3001');
 const NOTIFY_SECRET = process.env.NOTIFY_SECRET || '';
 const BOT_TOKEN      = process.env.BOT_TOKEN || '';
-
-// ─── Инициализация схемы БД ───────────────────────────────────────────────────
-async function initSchema() {
-  console.log('[schema] Initializing database schema...');
-  try {
-    // Миграция: CRM выдаёт компаниям строковые ID (co_169...), а не UUID.
-    // Если старая схема создала companies.id как UUID — пересоздаём таблицы
-    // (безопасно только пока в них нет данных).
-    const { rows: colCheck } = await db.query(`
-      SELECT data_type FROM information_schema.columns
-      WHERE table_name = 'companies' AND column_name = 'id'
-    `);
-    if (colCheck.length && colCheck[0].data_type === 'uuid') {
-      console.log('[schema] Migrating company id columns from UUID to TEXT...');
-      await db.query(`DROP TABLE IF EXISTS tickets, contractors, ticket_types, vehicles, users, companies CASCADE`);
-    }
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS companies (
-        id         TEXT PRIMARY KEY,
-        name       TEXT NOT NULL,
-        slug       TEXT UNIQUE NOT NULL,
-        bot_token  TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        company_id        TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-        name              TEXT NOT NULL,
-        email             TEXT,
-        phone             TEXT,
-        role              TEXT NOT NULL DEFAULT 'EMPLOYEE',
-        telegram_id       TEXT UNIQUE,
-        telegram_username TEXT,
-        license_number    TEXT,
-        license_category  TEXT,
-        license_expires   DATE,
-        medical_expires   DATE,
-        tachograph        TEXT,
-        briefing_date     DATE,
-        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_company  ON users(company_id)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_id)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_telegram_username ON users(LOWER(telegram_username))`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(LOWER(email))`);
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS vehicles (
-        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-        plate      TEXT NOT NULL,
-        model      TEXT,
-        brand      TEXT,
-        year       SMALLINT,
-        status     TEXT NOT NULL DEFAULT 'active',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_vehicles_company ON vehicles(company_id)`);
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS ticket_types (
-        id         SERIAL PRIMARY KEY,
-        company_id TEXT REFERENCES companies(id) ON DELETE CASCADE,
-        name       TEXT NOT NULL,
-        icon       TEXT,
-        sort_order INTEGER NOT NULL DEFAULT 0
-      )
-    `);
-
-    // Базовые типы заявок (только если таблица пустая)
-    const { rows } = await db.query(`SELECT COUNT(*) FROM ticket_types WHERE company_id IS NULL`);
-    if (parseInt(rows[0].count) === 0) {
-      await db.query(`
-        INSERT INTO ticket_types (name, icon, sort_order) VALUES
-          ('Поломка / Неисправность', '🔴', 1),
-          ('Плановое ТО',              '🔧', 2),
-          ('Шины / Резина',            '🛞', 3),
-          ('Топливо',                  '⛽', 4),
-          ('Документы',                '📄', 5),
-          ('ДТП / Авария',             '🚨', 6),
-          ('Мойка',                    '🚿', 7),
-          ('Прочее',                   '❓', 8)
-      `);
-      console.log('[schema] Default ticket types inserted.');
-    }
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS contractors (
-        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-        name       TEXT NOT NULL,
-        phone      TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS tickets (
-        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        company_id    TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-        num           TEXT NOT NULL,
-        type_id       INTEGER REFERENCES ticket_types(id),
-        vehicle_id    UUID REFERENCES vehicles(id) ON DELETE SET NULL,
-        description   TEXT,
-        status        TEXT NOT NULL DEFAULT 'NEW',
-        created_by    UUID NOT NULL REFERENCES users(id),
-        assigned_to   UUID REFERENCES users(id),
-        contractor_id UUID REFERENCES contractors(id) ON DELETE SET NULL,
-        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_company    ON tickets(company_id)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_status     ON tickets(status)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by)`);
-
-    console.log('[schema] ✅ Schema ready.');
-  } catch (err) {
-    console.error('[schema] ❌ Schema init error:', err.message);
-    // Не прерываем запуск — возможно схема уже существует
-  }
-}
 
 // ─── Единый бот на все компании ───────────────────────────────────────────
 let bot = null;
@@ -161,6 +36,7 @@ async function startBot() {
     bot.launch().catch((err) => {
       console.error('[manager] ❌ Bot polling stopped:', err.message);
     });
+    notifier.setBot(bot);
     console.log(`[manager] ✅ Бот запущен: @${botUsername}`);
   } catch (err) {
     bot = null;
@@ -174,11 +50,14 @@ app.use(express.json());
 // ─── CORS (нужно, чтобы CRM на другом домене могла звать этот API) ───────────
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Notify-Secret');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Notify-Secret');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
+
+// ─── REST API для CRM (аккаунты, водители, ТС, заявки, подрядчики) ────────
+app.use('/api', apiRouter);
 
 function checkSecret(req, res, next) {
   if (!NOTIFY_SECRET) return next();
@@ -259,12 +138,18 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
   console.log('╔══════════════════════════════════════╗');
   console.log('║  FleetDesk Bot Manager               ║');
   console.log('╚══════════════════════════════════════╝');
-  await initSchema();
+  try {
+    await initSchema();
+  } catch (err) {
+    console.error('[schema] ❌ Schema init error:', err.message);
+  }
   await startBot();
   app.listen(NOTIFY_PORT, () => {
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
+    console.log(`  /api/auth/*         — регистрация, вход, сессия`);
+    console.log(`  /api/bootstrap      — все данные компании`);
+    console.log(`  /api/drivers|vehicles|tickets|contractors — CRUD`);
     console.log(`  POST /notify        — уведомить водителей о смене статуса`);
-    console.log(`  POST /sync/driver   — синхронизировать карточку водителя из CRM`);
     console.log(`  GET  /bot-info      — юзернейм и ссылка общего бота`);
     console.log(`  GET  /health        — healthcheck`);
   });

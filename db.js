@@ -2,6 +2,13 @@
 'use strict';
 require('dotenv').config();
 const { Pool } = require('pg');
+const { TICKET_TYPES, BY_KEY } = require('./ticket-types');
+
+// Подставляет название и иконку типа заявки по её ключу
+function withTypeInfo(row) {
+  const t = BY_KEY[row.type_key] || BY_KEY.other;
+  return { ...row, type_name: t.name, type_icon: t.icon };
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -139,29 +146,26 @@ module.exports = {
 
   async getTicketsByUser(userId, companyId, limit = 10) {
     const { rows } = await pool.query(
-      `SELECT t.*, tt.name AS type_name, tt.icon AS type_icon, v.plate AS vehicle_plate
+      `SELECT t.*, v.plate AS vehicle_plate
        FROM tickets t
-       LEFT JOIN ticket_types tt ON tt.id = t.type_id
        LEFT JOIN vehicles v ON v.id = t.vehicle_id
        WHERE t.company_id = $1 AND (t.created_by = $2 OR t.assigned_to = $2)
        ORDER BY t.created_at DESC LIMIT $3`,
       [companyId, userId, limit]
     );
-    return rows;
+    return rows.map(withTypeInfo);
   },
 
   async getTicketById(ticketId, companyId) {
     const { rows } = await pool.query(
-      `SELECT t.*, tt.name AS type_name, tt.icon AS type_icon, v.plate AS vehicle_plate,
-              c.name AS contractor_name
+      `SELECT t.*, v.plate AS vehicle_plate, c.name AS contractor_name
        FROM tickets t
-       LEFT JOIN ticket_types tt ON tt.id = t.type_id
        LEFT JOIN vehicles v ON v.id = t.vehicle_id
        LEFT JOIN contractors c ON c.id = t.contractor_id
        WHERE t.id = $1 AND t.company_id = $2 LIMIT 1`,
       [ticketId, companyId]
     );
-    return rows[0] || null;
+    return rows[0] ? withTypeInfo(rows[0]) : null;
   },
 
   async getVehiclesByCompany(companyId) {
@@ -172,29 +176,30 @@ module.exports = {
     return rows;
   },
 
-  async getTicketTypesByCompany(companyId) {
-    const { rows } = await pool.query(
-      'SELECT * FROM ticket_types WHERE company_id IS NULL OR company_id = $1 ORDER BY sort_order',
-      [companyId]
-    );
-    return rows;
+  // Типы заявок общие для CRM и бота — берём из справочника, не из БД
+  async getTicketTypesByCompany() {
+    return TICKET_TYPES;
   },
 
   async createTicket(data) {
+    const history = [{ from: null, to: 'NEW', time: new Date().toISOString(), who: data.created_by }];
     const { rows } = await pool.query(
-      `INSERT INTO tickets (company_id, type_id, vehicle_id, description, status, created_by, num, created_at)
-       VALUES ($1, $2, $3, $4, 'NEW', $5, $6, NOW())
+      `INSERT INTO tickets (company_id, type_key, title, vehicle_id, description, status,
+         priority, created_by, num, comments, history, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'NEW', 'MEDIUM', $6, $7, '[]'::jsonb, $8, NOW())
        RETURNING *`,
-      [data.company_id, data.type_id, data.vehicle_id, data.description, data.created_by, data.num]
+      [data.company_id, data.type_key || 'other', data.title || null, data.vehicle_id,
+       data.description, data.created_by, data.num, JSON.stringify(history)]
     );
-    return rows[0];
+    return withTypeInfo(rows[0]);
   },
 
   async getNextTicketNum(companyId) {
     const { rows } = await pool.query(
-      "SELECT COALESCE(MAX(CAST(REGEXP_REPLACE(num, '[^0-9]', '', 'g') AS INTEGER)), 0) + 1 AS next FROM tickets WHERE company_id = $1",
+      `SELECT COALESCE(MAX(NULLIF(REGEXP_REPLACE(num, '\\D', '', 'g'), '')::INTEGER), 0) + 1 AS next
+       FROM tickets WHERE company_id = $1`,
       [companyId]
     );
-    return `#${rows[0].next}`;
+    return 'TK-' + String(rows[0].next).padStart(4, '0');
   },
 };

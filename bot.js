@@ -114,7 +114,8 @@ function createBot(token) {
         const num    = await db.getNextTicketNum(session.companyId);
         const ticket = await db.createTicket({
           company_id:  session.companyId,
-          type_id:     session.pendingTicket.typeId,
+          type_key:    session.pendingTicket.typeKey,
+          title:       text.slice(0, 80),
           vehicle_id:  session.pendingTicket.vehicleId,
           description: text,
           created_by:  session.userId,
@@ -176,8 +177,7 @@ function createBot(token) {
     await ctx.answerCbQuery();
 
     if (data.startsWith('tt:')) {
-      const typeId = data.split(':')[1];
-      session.pendingTicket.typeId = typeId;
+      session.pendingTicket.typeKey = data.split(':')[1];
       session.step = 'new_ticket_vehicle';
       try {
         const vehicles = await db.getVehiclesByCompany(session.companyId);
@@ -242,7 +242,7 @@ async function startNewTicket(ctx, companyId, session) {
     }
     session.step = 'new_ticket_type'; session.pendingTicket = {};
     const buttons = types.map(t =>
-      [Markup.button.callback(`${t.icon || '📋'} ${t.name}`, `tt:${t.id}`)]
+      [Markup.button.callback(`${t.icon || '📋'} ${t.name}`, `tt:${t.key}`)]
     );
     buttons.push([Markup.button.callback('❌ Отмена', 'cancel')]);
     await ctx.reply('📝 *Новая заявка*\n\nВыберите тип заявки:',

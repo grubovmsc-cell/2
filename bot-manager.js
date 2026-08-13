@@ -1,4 +1,4 @@
-// bot-manager.js — мульти-тенантный оркестратор
+// bot-manager.js — единый бот на все компании + HTTP API (уведомления, синхронизация из CRM)
 'use strict';
 require('dotenv').config();
 const express = require('express');
@@ -7,54 +7,172 @@ const { createBot } = require('./bot');
 
 const NOTIFY_PORT   = parseInt(process.env.NOTIFY_PORT   || '3001');
 const NOTIFY_SECRET = process.env.NOTIFY_SECRET || '';
+const BOT_TOKEN      = process.env.BOT_TOKEN || '';
 
-const activeBots = new Map();
+// ─── Инициализация схемы БД ───────────────────────────────────────────────────
+async function initSchema() {
+  console.log('[schema] Initializing database schema...');
+  try {
+    // Миграция: CRM выдаёт компаниям строковые ID (co_169...), а не UUID.
+    // Если старая схема создала companies.id как UUID — пересоздаём таблицы
+    // (безопасно только пока в них нет данных).
+    const { rows: colCheck } = await db.query(`
+      SELECT data_type FROM information_schema.columns
+      WHERE table_name = 'companies' AND column_name = 'id'
+    `);
+    if (colCheck.length && colCheck[0].data_type === 'uuid') {
+      console.log('[schema] Migrating company id columns from UUID to TEXT...');
+      await db.query(`DROP TABLE IF EXISTS tickets, contractors, ticket_types, vehicles, users, companies CASCADE`);
+    }
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS companies (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        slug       TEXT UNIQUE NOT NULL,
+        bot_token  TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id        TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        name              TEXT NOT NULL,
+        email             TEXT,
+        phone             TEXT,
+        role              TEXT NOT NULL DEFAULT 'EMPLOYEE',
+        telegram_id       TEXT UNIQUE,
+        telegram_username TEXT,
+        license_number    TEXT,
+        license_category  TEXT,
+        license_expires   DATE,
+        medical_expires   DATE,
+        tachograph        TEXT,
+        briefing_date     DATE,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_company  ON users(company_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_telegram_username ON users(LOWER(telegram_username))`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(LOWER(email))`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS vehicles (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        plate      TEXT NOT NULL,
+        model      TEXT,
+        brand      TEXT,
+        year       SMALLINT,
+        status     TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_vehicles_company ON vehicles(company_id)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ticket_types (
+        id         SERIAL PRIMARY KEY,
+        company_id TEXT REFERENCES companies(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        icon       TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+
+    // Базовые типы заявок (только если таблица пустая)
+    const { rows } = await db.query(`SELECT COUNT(*) FROM ticket_types WHERE company_id IS NULL`);
+    if (parseInt(rows[0].count) === 0) {
+      await db.query(`
+        INSERT INTO ticket_types (name, icon, sort_order) VALUES
+          ('Поломка / Неисправность', '🔴', 1),
+          ('Плановое ТО',              '🔧', 2),
+          ('Шины / Резина',            '🛞', 3),
+          ('Топливо',                  '⛽', 4),
+          ('Документы',                '📄', 5),
+          ('ДТП / Авария',             '🚨', 6),
+          ('Мойка',                    '🚿', 7),
+          ('Прочее',                   '❓', 8)
+      `);
+      console.log('[schema] Default ticket types inserted.');
+    }
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS contractors (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        phone      TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS tickets (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        company_id    TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        num           TEXT NOT NULL,
+        type_id       INTEGER REFERENCES ticket_types(id),
+        vehicle_id    UUID REFERENCES vehicles(id) ON DELETE SET NULL,
+        description   TEXT,
+        status        TEXT NOT NULL DEFAULT 'NEW',
+        created_by    UUID NOT NULL REFERENCES users(id),
+        assigned_to   UUID REFERENCES users(id),
+        contractor_id UUID REFERENCES contractors(id) ON DELETE SET NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_company    ON tickets(company_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_status     ON tickets(status)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by)`);
+
+    console.log('[schema] ✅ Schema ready.');
+  } catch (err) {
+    console.error('[schema] ❌ Schema init error:', err.message);
+    // Не прерываем запуск — возможно схема уже существует
+  }
+}
+
+// ─── Единый бот на все компании ───────────────────────────────────────────
+let bot = null;
+let botUsername = '';
 
 const STATUS_LABELS = {
   NEW: '🆕 Новая', IN_PROGRESS: '🔧 В работе',
   WAITING: '⏳ Ожидание', DONE: '✅ Завершена', CANCELLED: '❌ Отменена',
 };
 
-async function startBotForCompany(companyId, token) {
-  if (activeBots.has(companyId)) {
-    console.log(`[manager] Bot for company ${companyId} already running — skipping.`);
+async function startBot() {
+  if (!BOT_TOKEN) {
+    console.error('[manager] ❌ BOT_TOKEN не задан в .env — бот не запущен.');
     return;
   }
   try {
-    const bot = createBot(token, companyId);
+    bot = createBot(BOT_TOKEN);
     await bot.launch();
-    activeBots.set(companyId, { bot, token });
-    console.log(`[manager] ✅ Bot started for company: ${companyId}`);
+    const me = await bot.telegram.getMe();
+    botUsername = me.username || '';
+    console.log(`[manager] ✅ Бот запущен: @${botUsername}`);
   } catch (err) {
-    console.error(`[manager] ❌ Failed to start bot for company ${companyId}:`, err.message);
-  }
-}
-
-async function stopBotForCompany(companyId) {
-  const entry = activeBots.get(companyId);
-  if (!entry) return;
-  try {
-    await entry.bot.stop();
-    activeBots.delete(companyId);
-    console.log(`[manager] 🛑 Bot stopped for company: ${companyId}`);
-  } catch (err) {
-    console.error(`[manager] Error stopping bot for ${companyId}:`, err.message);
-  }
-}
-
-async function loadAllCompanies() {
-  try {
-    const companies = await db.getAllCompaniesWithTokens();
-    console.log(`[manager] Found ${companies.length} companies with bot tokens.`);
-    for (const c of companies) await startBotForCompany(c.id, c.bot_token);
-  } catch (err) {
-    console.error('[manager] Error loading companies from DB:', err.message);
-    console.error('[manager] Continuing without DB bots (you can add them via API).');
+    console.error('[manager] ❌ Failed to start bot:', err.message);
   }
 }
 
 const app = express();
 app.use(express.json());
+
+// ─── CORS (нужно, чтобы CRM на другом домене могла звать этот API) ───────────
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Notify-Secret');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 function checkSecret(req, res, next) {
   if (!NOTIFY_SECRET) return next();
@@ -67,8 +185,7 @@ app.post('/notify', checkSecret, async (req, res) => {
   const { companyId, ticketId, newStatus, assignedToId } = req.body;
   if (!companyId || !ticketId || !newStatus)
     return res.status(400).json({ error: 'companyId, ticketId, newStatus required' });
-  const entry = activeBots.get(companyId);
-  if (!entry) return res.status(404).json({ error: `No active bot for company ${companyId}` });
+  if (!bot) return res.status(503).json({ error: 'Bot is not running' });
   try {
     const ticket = await db.getTicketById(ticketId, companyId);
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
@@ -89,7 +206,7 @@ app.post('/notify', checkSecret, async (req, res) => {
         `🚛 ${ticket.vehicle_plate || '—'}\n` +
         `📋 ${ticket.type_icon || ''} ${ticket.type_name || 'Заявка'}\n` +
         `${ticket.description ? ticket.description.slice(0, 100) : ''}`;
-      await entry.bot.telegram.sendMessage(rows[0].telegram_id, text, { parse_mode: 'Markdown' });
+      await bot.telegram.sendMessage(rows[0].telegram_id, text, { parse_mode: 'Markdown' });
       sent++;
     }
     res.json({ ok: true, sent });
@@ -99,33 +216,34 @@ app.post('/notify', checkSecret, async (req, res) => {
   }
 });
 
-app.post('/bots/add', checkSecret, async (req, res) => {
-  const { companyId, token } = req.body;
-  if (!companyId || !token) return res.status(400).json({ error: 'companyId and token required' });
-  if (activeBots.has(companyId)) await stopBotForCompany(companyId);
-  await startBotForCompany(companyId, token);
-  try { await db.query('UPDATE companies SET bot_token = $1 WHERE id = $2', [token, companyId]); }
-  catch (err) { console.warn('[manager] Could not save token to DB:', err.message); }
-  res.json({ ok: activeBots.has(companyId), companyId, active: activeBots.has(companyId) });
+// ─── Синхронизация карточек из CRM ────────────────────────────────────────
+// CRM живёт со своими локальными данными (компании, водители) и зовёт этот
+// эндпоинт при создании/сохранении карточки водителя, чтобы бот видел его
+// company_id и Telegram-ник и мог опознать водителя при первом /start.
+app.post('/sync/driver', checkSecret, async (req, res) => {
+  const { companyId, companyName, driver } = req.body;
+  if (!companyId || !driver || !driver.name)
+    return res.status(400).json({ error: 'companyId and driver.name required' });
+  try {
+    await db.upsertCompany(companyId, companyName);
+    const result = await db.upsertUserFromCrm(companyId, driver);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[manager] /sync/driver error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/bots/remove', checkSecret, async (req, res) => {
-  const { companyId } = req.body;
-  if (!companyId) return res.status(400).json({ error: 'companyId required' });
-  await stopBotForCompany(companyId);
-  try { await db.query("UPDATE companies SET bot_token = NULL WHERE id = $1", [companyId]); } catch {}
-  res.json({ ok: true, companyId });
+// Отдаёт CRM данные общего бота — чтобы показать готовую ссылку-приглашение.
+app.get('/bot-info', (req, res) => {
+  res.json({ ok: !!bot, username: botUsername, link: botUsername ? `https://t.me/${botUsername}` : '' });
 });
 
-app.get('/bots', checkSecret, (req, res) => {
-  res.json({ bots: [...activeBots.entries()].map(([id]) => ({ companyId: id, active: true })) });
-});
-
-app.get('/health', (_, res) => res.json({ ok: true, bots: activeBots.size }));
+app.get('/health', (_, res) => res.json({ ok: true, active: !!bot, username: botUsername }));
 
 async function shutdown(signal) {
-  console.log(`\n[manager] ${signal} received. Stopping all bots...`);
-  for (const [id] of activeBots) await stopBotForCompany(id);
+  console.log(`\n[manager] ${signal} received. Stopping bot...`);
+  if (bot) { try { await bot.stop(); } catch {} }
   process.exit(0);
 }
 process.once('SIGINT',  () => shutdown('SIGINT'));
@@ -135,13 +253,13 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
   console.log('╔══════════════════════════════════════╗');
   console.log('║  FleetDesk Bot Manager               ║');
   console.log('╚══════════════════════════════════════╝');
-  await loadAllCompanies();
+  await initSchema();
+  await startBot();
   app.listen(NOTIFY_PORT, () => {
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
-    console.log(`  POST /notify       — уведомить водителей о смене статуса`);
-    console.log(`  POST /bots/add     — добавить/обновить токен компании`);
-    console.log(`  POST /bots/remove  — остановить бот компании`);
-    console.log(`  GET  /bots         — список активных ботов`);
-    console.log(`  GET  /health       — healthcheck`);
+    console.log(`  POST /notify        — уведомить водителей о смене статуса`);
+    console.log(`  POST /sync/driver   — синхронизировать карточку водителя из CRM`);
+    console.log(`  GET  /bot-info      — юзернейм и ссылка общего бота`);
+    console.log(`  GET  /health        — healthcheck`);
   });
 })();

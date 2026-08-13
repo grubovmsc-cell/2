@@ -1,4 +1,4 @@
-// bot.js — один экземпляр бота для одной компании
+// bot.js — единый бот на все компании (мультитенантность по данным пользователя)
 'use strict';
 require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
@@ -7,9 +7,11 @@ const db = require('./db');
 const T = {
   welcome_unlinked: (name) =>
     `👋 Привет, ${name}!\n\nЯ бот FleetDesk — системы управления автопарком.\n\n` +
-    `Чтобы начать работу, введите ваш рабочий e-mail для привязки аккаунта:`,
+    `Не нашёл вас по Telegram-нику в базе. Введите ваш рабочий e-mail для привязки аккаунта:`,
   linked: (name) =>
     `✅ Аккаунт привязан! Добро пожаловать, ${name}.\n\nВыберите действие в меню ниже:`,
+  linked_auto: (name) =>
+    `✅ Узнал вас по Telegram-аккаунту! Добро пожаловать, ${name}.\n\nВыберите действие в меню ниже:`,
   already_linked: (name) =>
     `👋 С возвращением, ${name}! Выберите действие:`,
   email_not_found:
@@ -28,28 +30,46 @@ function mainMenu() {
 const DEFAULT_SESSION = () => ({
   step: null,
   userId: null,
+  companyId: null,
   pendingTicket: {},
   editingField: null,
 });
 
-function createBot(token, companyId) {
+function createBot(token) {
   const bot = new Telegraf(token);
   bot.use(session({ defaultSession: DEFAULT_SESSION }));
 
   bot.start(async (ctx) => {
-    const tgId   = ctx.from.id;
-    const tgName = ctx.from.first_name || 'Водитель';
-    ctx.session  = DEFAULT_SESSION();
+    const tgId       = ctx.from.id;
+    const tgUsername = ctx.from.username;
+    const tgName     = ctx.from.first_name || 'Водитель';
+    ctx.session = DEFAULT_SESSION();
     try {
-      const user = await db.getUserByTelegramId(tgId, companyId);
+      let user = await db.getUserByTelegramId(tgId);
       if (user) {
-        ctx.session.userId = user.id;
-        ctx.session.step   = null;
+        ctx.session.userId    = user.id;
+        ctx.session.companyId = user.company_id;
+        ctx.session.step      = null;
         await ctx.reply(T.already_linked(user.name), mainMenu());
-      } else {
-        ctx.session.step = 'await_email';
-        await ctx.reply(T.welcome_unlinked(tgName));
+        return;
       }
+
+      // Компания заранее не известна — узнаём водителя по Telegram-нику,
+      // который диспетчер указал в его карточке в CRM.
+      if (tgUsername) {
+        user = await db.getUserByTelegramUsername(tgUsername);
+        if (user) {
+          await db.linkTelegram(user.id, tgId, tgUsername);
+          ctx.session.userId    = user.id;
+          ctx.session.companyId = user.company_id;
+          ctx.session.step      = null;
+          await ctx.reply(T.linked_auto(user.name), mainMenu());
+          return;
+        }
+      }
+
+      ctx.session.step = 'await_email';
+      await ctx.reply(T.welcome_unlinked(tgName));
     } catch (err) {
       console.error('[bot] /start error:', err.message);
       await ctx.reply('⚠️ Ошибка сервера. Попробуйте позже.');
@@ -68,11 +88,12 @@ function createBot(token, companyId) {
     if (session.step === 'await_email') {
       const email = text.toLowerCase();
       try {
-        const user = await db.getUserByEmail(email, companyId);
+        const user = await db.getUserByEmail(email);
         if (!user) { await ctx.reply(T.email_not_found); return; }
         await db.linkTelegram(user.id, tgId, ctx.from.username);
-        session.userId = user.id;
-        session.step   = null;
+        session.userId    = user.id;
+        session.companyId = user.company_id;
+        session.step      = null;
         await ctx.reply(T.linked(user.name), mainMenu());
       } catch (err) {
         console.error('[bot] email link error:', err.message);
@@ -90,9 +111,9 @@ function createBot(token, companyId) {
     if (session.step === 'new_ticket_desc') {
       session.pendingTicket.description = text;
       try {
-        const num    = await db.getNextTicketNum(companyId);
+        const num    = await db.getNextTicketNum(session.companyId);
         const ticket = await db.createTicket({
-          company_id:  companyId,
+          company_id:  session.companyId,
           type_id:     session.pendingTicket.typeId,
           vehicle_id:  session.pendingTicket.vehicleId,
           description: text,
@@ -132,8 +153,8 @@ function createBot(token, companyId) {
       return;
     }
 
-    if (text === '📝 Новая заявка') { await startNewTicket(ctx, companyId, session); return; }
-    if (text === '📋 Мои заявки')   { await showMyTickets(ctx, session.userId, companyId); return; }
+    if (text === '📝 Новая заявка') { await startNewTicket(ctx, session.companyId, session); return; }
+    if (text === '📋 Мои заявки')   { await showMyTickets(ctx, session.userId, session.companyId); return; }
     if (text === '👤 Мой профиль')  { await showProfile(ctx, session.userId); return; }
     if (text === 'ℹ️ Помощь') {
       await ctx.reply(
@@ -159,7 +180,7 @@ function createBot(token, companyId) {
       session.pendingTicket.typeId = typeId;
       session.step = 'new_ticket_vehicle';
       try {
-        const vehicles = await db.getVehiclesByCompany(companyId);
+        const vehicles = await db.getVehiclesByCompany(session.companyId);
         if (!vehicles.length) {
           await ctx.editMessageText('⚠️ В компании нет зарегистрированных ТС. Обратитесь к диспетчеру.');
           session.step = null; return;
@@ -289,12 +310,11 @@ function formatDate(d) {
 }
 
 if (require.main === module) {
-  const token     = process.env.BOT_TOKEN;
-  const companyId = process.env.COMPANY_ID || 'co1';
+  const token = process.env.BOT_TOKEN;
   if (!token) { console.error('BOT_TOKEN not set in .env'); process.exit(1); }
-  const bot = createBot(token, companyId);
+  const bot = createBot(token);
   bot.launch()
-    .then(() => console.log(`[bot] Started for company ${companyId}`))
+    .then(() => console.log('[bot] Started (единый бот на все компании)'))
     .catch((err) => { console.error('[bot] Launch error:', err.message); process.exit(1); });
   process.once('SIGINT',  () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));

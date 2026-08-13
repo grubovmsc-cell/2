@@ -22,35 +22,102 @@ module.exports = {
   query: (text, params) => pool.query(text, params),
   pool,
 
-  async getCompanyByToken(botToken) {
+  // ── Единый бот на все компании ──────────────────────────────
+  // Токена на компанию больше нет — пользователя (и его company_id)
+  // ищем глобально: сначала по telegram_id, потом по нику из карточки
+  // водителя в CRM, и только в крайнем случае — по e-mail.
+
+  async getUserByTelegramId(telegramId) {
     const { rows } = await pool.query(
-      'SELECT * FROM companies WHERE bot_token = $1 LIMIT 1',
-      [botToken]
+      'SELECT * FROM users WHERE telegram_id = $1 LIMIT 1',
+      [String(telegramId)]
     );
     return rows[0] || null;
   },
 
-  async getAllCompaniesWithTokens() {
+  async getUserByTelegramUsername(username) {
+    const clean = String(username || '').replace(/^@/, '').trim();
+    if (!clean) return null;
     const { rows } = await pool.query(
-      "SELECT id, name, bot_token FROM companies WHERE bot_token IS NOT NULL AND bot_token <> ''"
-    );
-    return rows;
-  },
-
-  async getUserByTelegramId(telegramId, companyId) {
-    const { rows } = await pool.query(
-      'SELECT * FROM users WHERE telegram_id = $1 AND company_id = $2 LIMIT 1',
-      [String(telegramId), companyId]
+      'SELECT * FROM users WHERE LOWER(telegram_username) = LOWER($1) LIMIT 1',
+      [clean]
     );
     return rows[0] || null;
   },
 
-  async getUserByEmail(email, companyId) {
+  async getUserByEmail(email) {
     const { rows } = await pool.query(
-      'SELECT * FROM users WHERE LOWER(email) = LOWER($1) AND company_id = $2 LIMIT 1',
-      [email, companyId]
+      'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+      [email]
     );
     return rows[0] || null;
+  },
+
+  // ── Синхронизация из CRM (карточки компаний/водителей) ──────
+
+  async upsertCompany(id, name) {
+    if (!id) return;
+    await pool.query(
+      `INSERT INTO companies (id, name, slug) VALUES ($1, $2, $1)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+      [id, name || id]
+    );
+  },
+
+  // Апсерт водителя по данным из карточки CRM. Ищем существующую
+  // запись в пределах компании по e-mail, а если не нашли — по
+  // Telegram-нику, чтобы не плодить дубли при повторном сохранении.
+  async upsertUserFromCrm(companyId, data) {
+    const email    = (data.email || '').toLowerCase().trim() || null;
+    const telegram = String(data.telegram || '').replace(/^@/, '').trim() || null;
+
+    let existing = null;
+    if (email) {
+      const r = await pool.query(
+        'SELECT id FROM users WHERE company_id = $1 AND LOWER(email) = $2 LIMIT 1',
+        [companyId, email]
+      );
+      existing = r.rows[0] || null;
+    }
+    if (!existing && telegram) {
+      const r = await pool.query(
+        'SELECT id FROM users WHERE company_id = $1 AND LOWER(telegram_username) = LOWER($2) LIMIT 1',
+        [companyId, telegram]
+      );
+      existing = r.rows[0] || null;
+    }
+
+    const fields = {
+      name:              data.name || 'Без имени',
+      email,
+      phone:             data.phone || null,
+      telegram_username: telegram,
+      license_number:    data.license_number    || null,
+      license_category:  data.license_category  || null,
+      license_expires:   data.license_expires    || null,
+      medical_expires:   data.medical_expires    || null,
+      tachograph:        typeof data.tachograph === 'string' ? data.tachograph : null,
+      briefing_date:     data.briefing_date      || null,
+    };
+
+    if (existing) {
+      const keys = Object.keys(fields);
+      const sets = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+      const vals = keys.map(k => fields[k]);
+      vals.push(existing.id);
+      await pool.query(`UPDATE users SET ${sets} WHERE id = $${vals.length}`, vals);
+      return { id: existing.id, created: false };
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO users (company_id, name, email, phone, telegram_username,
+         license_number, license_category, license_expires, medical_expires, tachograph, briefing_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [companyId, fields.name, fields.email, fields.phone, fields.telegram_username,
+       fields.license_number, fields.license_category, fields.license_expires,
+       fields.medical_expires, fields.tachograph, fields.briefing_date]
+    );
+    return { id: rows[0].id, created: true };
   },
 
   async linkTelegram(userId, telegramId, telegramUsername) {

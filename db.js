@@ -168,6 +168,20 @@ module.exports = {
     return rows[0] ? withTypeInfo(rows[0]) : null;
   },
 
+  // Автомобиль, закреплённый за водителем. Привязка может быть указана
+  // с любой стороны: в карточке водителя или в карточке машины.
+  async getAssignedVehicle(userId) {
+    const { rows } = await pool.query(
+      `SELECT v.* FROM vehicles v
+       WHERE v.status <> 'decommissioned'
+         AND (v.id = (SELECT assigned_vehicle FROM users WHERE id = $1)
+              OR v.assigned_user_id = $1)
+       LIMIT 1`,
+      [userId]
+    );
+    return rows[0] || null;
+  },
+
   async getVehiclesByCompany(companyId) {
     const { rows } = await pool.query(
       "SELECT * FROM vehicles WHERE company_id = $1 AND status != 'decommissioned' ORDER BY plate",

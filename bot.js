@@ -187,21 +187,13 @@ function createBot(token) {
     if (data.startsWith('tt:')) {
       session.pendingTicket.typeKey = data.split(':')[1];
       session.step = 'new_ticket_vehicle';
-      try {
-        const vehicles = await db.getVehiclesByCompany(session.companyId);
-        if (!vehicles.length) {
-          await ctx.editMessageText('⚠️ В компании нет зарегистрированных ТС. Обратитесь к диспетчеру.');
-          session.step = null; return;
-        }
-        const buttons = vehicles.map(v =>
-          [Markup.button.callback(`🚛 ${v.plate} — ${v.model || ''}`.trim(), `veh:${v.id}`)]
-        );
-        buttons.push([Markup.button.callback('❌ Отмена', 'cancel')]);
-        await ctx.editMessageText('🚛 Выберите транспортное средство:', Markup.inlineKeyboard(buttons));
-      } catch (err) {
-        console.error('[bot] vehicles load error:', err.message);
-        await ctx.editMessageText('⚠️ Ошибка загрузки ТС.');
-      }
+      await askVehicle(ctx, session, { onlyAssigned: true });
+      return;
+    }
+
+    // «Другой автомобиль» — показываем весь парк компании
+    if (data === 'veh_all') {
+      await askVehicle(ctx, session, { onlyAssigned: false });
       return;
     }
 
@@ -239,6 +231,44 @@ function createBot(token) {
   });
 
   return bot;
+}
+
+// Спрашивает автомобиль для заявки. Если за водителем закреплена машина —
+// предлагаем сразу её, оставляя возможность выбрать любую другую.
+async function askVehicle(ctx, session, { onlyAssigned }) {
+  const label = (v) => `🚛 ${v.plate}${v.brand || v.model ? ' — ' + [v.brand, v.model].filter(Boolean).join(' ') : ''}`;
+  try {
+    if (onlyAssigned) {
+      const mine = await db.getAssignedVehicle(session.userId);
+      if (mine) {
+        await ctx.editMessageText(
+          `🚛 За вами закреплён *${mine.plate}*${mine.brand ? ' — ' + [mine.brand, mine.model].filter(Boolean).join(' ') : ''}.\n\nОформляем заявку на него?`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback(`✅ Да, ${mine.plate}`, `veh:${mine.id}`)],
+              [Markup.button.callback('🔄 Другой автомобиль', 'veh_all')],
+              [Markup.button.callback('❌ Отмена', 'cancel')],
+            ]),
+          }
+        );
+        return;
+      }
+    }
+
+    const vehicles = await db.getVehiclesByCompany(session.companyId);
+    if (!vehicles.length) {
+      await ctx.editMessageText('⚠️ В компании нет зарегистрированных ТС. Обратитесь к диспетчеру.');
+      session.step = null;
+      return;
+    }
+    const buttons = vehicles.map(v => [Markup.button.callback(label(v), `veh:${v.id}`)]);
+    buttons.push([Markup.button.callback('❌ Отмена', 'cancel')]);
+    await ctx.editMessageText('🚛 Выберите транспортное средство:', Markup.inlineKeyboard(buttons));
+  } catch (err) {
+    console.error('[bot] vehicles load error:', err.message);
+    await ctx.editMessageText('⚠️ Ошибка загрузки ТС.');
+  }
 }
 
 async function startNewTicket(ctx, companyId, session) {

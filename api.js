@@ -5,7 +5,7 @@ const crypto  = require('crypto');
 const express = require('express');
 const db      = require('./db');
 const { TICKET_TYPES } = require('./ticket-types');
-const { notifyTicketStatus, notifyTicketComment } = require('./notifier');
+const { notifyTicketStatus, notifyTicketComment, notifyTicketContractor } = require('./notifier');
 
 const router = express.Router();
 
@@ -326,14 +326,33 @@ router.delete('/vehicles/:id', auth, async (req, res) => {
 });
 
 // ─── Подрядчики ────────────────────────────────────────────────────────────
+const CONTRACTOR_FIELDS = ['name', 'phone', 'contact_person', 'email', 'website',
+  'address', 'work_hours', 'notes', 'specializations'];
+
+function contractorValues(body) {
+  let site = String(body.website || '').trim();
+  // Пользователь обычно пишет домен без схемы — добавим, чтобы ссылка работала
+  if (site && !/^https?:\/\//i.test(site)) site = 'https://' + site;
+  return {
+    name:            body.name || 'Без названия',
+    phone:           nz(body.phone),
+    contact_person:  nz(body.contact_person),
+    email:           nz(body.email),
+    website:         site || null,
+    address:         nz(body.address),
+    work_hours:      nz(body.work_hours),
+    notes:           nz(body.notes),
+    specializations: JSON.stringify(Array.isArray(body.specializations) ? body.specializations : []),
+  };
+}
+
 router.post('/contractors', auth, async (req, res) => {
-  const b = req.body || {};
+  const v = contractorValues(req.body || {});
   try {
     const { rows } = await db.query(
-      `INSERT INTO contractors (company_id, name, phone, specializations)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [req.account.company_id, b.name || 'Без названия', nz(b.phone),
-       JSON.stringify(Array.isArray(b.specializations) ? b.specializations : [])]
+      `INSERT INTO contractors (company_id, ${CONTRACTOR_FIELDS.join(', ')})
+       VALUES ($1, ${CONTRACTOR_FIELDS.map((_, i) => `$${i + 2}`).join(', ')}) RETURNING *`,
+      [req.account.company_id, ...CONTRACTOR_FIELDS.map(f => v[f])]
     );
     res.json(rows[0]);
   } catch (err) {
@@ -343,14 +362,13 @@ router.post('/contractors', auth, async (req, res) => {
 });
 
 router.patch('/contractors/:id', auth, async (req, res) => {
-  const b = req.body || {};
+  const v = contractorValues(req.body || {});
+  const sets = CONTRACTOR_FIELDS.map((f, i) => `${f} = $${i + 1}`).join(', ');
   try {
     const { rows } = await db.query(
-      `UPDATE contractors SET name = $1, phone = $2, specializations = $3
-       WHERE id = $4 AND company_id = $5 RETURNING *`,
-      [b.name || 'Без названия', nz(b.phone),
-       JSON.stringify(Array.isArray(b.specializations) ? b.specializations : []),
-       req.params.id, req.account.company_id]
+      `UPDATE contractors SET ${sets} WHERE id = $${CONTRACTOR_FIELDS.length + 1}
+       AND company_id = $${CONTRACTOR_FIELDS.length + 2} RETURNING *`,
+      [...CONTRACTOR_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Подрядчик не найден' });
     res.json(rows[0]);
@@ -444,6 +462,12 @@ router.patch('/tickets/:id', auth, async (req, res) => {
       if (c.internal || c.fromDriver) continue;
       notifyTicketComment(rows[0], c).catch(err =>
         console.error('[api] comment notify error:', err.message));
+    }
+
+    // Назначили (или сменили) подрядчика — отправляем водителю его контакты
+    if (rows[0].contractor_id && rows[0].contractor_id !== t.contractor_id) {
+      notifyTicketContractor(rows[0], rows[0].contractor_id).catch(err =>
+        console.error('[api] contractor notify error:', err.message));
     }
   } catch (err) {
     console.error('[api] update ticket error:', err.message);

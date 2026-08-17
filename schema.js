@@ -145,6 +145,12 @@ async function initSchema() {
   `);
   await addColumns('contractors', {
     specializations: "JSONB NOT NULL DEFAULT '[]'::jsonb",
+    contact_person:  'TEXT',
+    email:           'TEXT',
+    website:         'TEXT',
+    address:         'TEXT',
+    notes:           'TEXT',
+    work_hours:      'TEXT',
   });
   await db.query(`CREATE INDEX IF NOT EXISTS idx_contractors_company ON contractors(company_id)`);
 

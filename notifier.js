@@ -68,4 +68,40 @@ async function notifyTicketComment(ticket, comment) {
   }
 }
 
-module.exports = { setBot, notifyTicketStatus, notifyTicketComment, STATUS_LABELS };
+// Назначен подрядчик → водителю уходят контакты исполнителя
+async function notifyTicketContractor(ticket, contractorId) {
+  if (!bot || !ticket || !ticket.created_by || !contractorId) return 0;
+  try {
+    const [{ rows: users }, { rows: contractors }] = await Promise.all([
+      db.query('SELECT telegram_id FROM users WHERE id = $1 AND telegram_id IS NOT NULL',
+        [ticket.created_by]),
+      db.query('SELECT * FROM contractors WHERE id = $1', [contractorId]),
+    ]);
+    if (!users[0] || !contractors[0]) return 0;
+
+    const c    = contractors[0];
+    const full = await db.getTicketById(ticket.id, ticket.company_id).catch(() => ticket);
+
+    const lines = [
+      `🔧 *Исполнитель назначен — заявка ${full.num}*`,
+      `${full.type_icon || ''} ${full.title || full.type_name || ''}`,
+      '',
+      `*${c.name}*`,
+    ];
+    if (c.contact_person) lines.push(`👤 Контакт: ${c.contact_person}`);
+    if (c.phone)          lines.push(`📞 Телефон: ${c.phone}`);
+    if (c.email)          lines.push(`✉️ E-mail: ${c.email}`);
+    if (c.website)        lines.push(`🌐 Сайт: ${c.website}`);
+    if (c.address)        lines.push(`📍 Адрес: ${c.address}`);
+    if (c.work_hours)     lines.push(`🕒 Часы работы: ${c.work_hours}`);
+    if (c.notes)          lines.push('', `_${c.notes}_`);
+
+    await bot.telegram.sendMessage(users[0].telegram_id, lines.join('\n'), { parse_mode: 'Markdown' });
+    return 1;
+  } catch (err) {
+    console.error('[notifier] contractor error:', err.message);
+    return 0;
+  }
+}
+
+module.exports = { setBot, notifyTicketStatus, notifyTicketComment, notifyTicketContractor, STATUS_LABELS };

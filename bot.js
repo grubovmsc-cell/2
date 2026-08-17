@@ -33,6 +33,7 @@ const DEFAULT_SESSION = () => ({
   companyId: null,
   pendingTicket: {},
   editingField: null,
+  replyTicketId: null,
 });
 
 function createBot(token) {
@@ -118,6 +119,7 @@ function createBot(token) {
     if (MENU_BUTTONS.includes(text)) {
       session.step = null;
       session.editingField = null;
+      session.replyTicketId = null;
     }
 
     if (session.step === 'await_email') {
@@ -145,6 +147,30 @@ function createBot(token) {
         `Проверьте у диспетчера, что в вашей карточке водителя указан Telegram-ник ` +
         `@${ctx.from.username || '—'}, либо введите рабочий e-mail для привязки:`
       );
+      return;
+    }
+
+    // Ответ водителя на комментарий диспетчера — уходит в ту же заявку
+    if (session.step === 'reply_comment' && session.replyTicketId) {
+      try {
+        const { rows } = await db.query('SELECT name FROM users WHERE id = $1', [session.userId]);
+        const updated = await db.addTicketComment(session.replyTicketId, {
+          userId: session.userId,
+          author: rows[0]?.name || 'Водитель',
+          text,
+          time: new Date().toISOString(),
+          internal: false,
+          fromDriver: true,
+        });
+        session.step = null; session.replyTicketId = null;
+        await ctx.reply(
+          updated ? `✅ Ответ отправлен диспетчеру по заявке ${updated.num}.` : '✅ Ответ отправлен.',
+          mainMenu()
+        );
+      } catch (err) {
+        console.error('[bot] reply comment error:', err.message);
+        await ctx.reply('⚠️ Не удалось отправить ответ. Попробуйте позже.', mainMenu());
+      }
       return;
     }
 
@@ -251,6 +277,14 @@ function createBot(token) {
         briefing_date: '📋 Дата последнего инструктажа (ДД.ММ.ГГГГ)',
       };
       await ctx.editMessageText(`${labels[field] || field}\n\nВведите новое значение:`);
+      return;
+    }
+
+    // Ответ на комментарий диспетчера
+    if (data.startsWith('reply:')) {
+      session.replyTicketId = data.split(':')[1];
+      session.step = 'reply_comment';
+      await ctx.reply('✍️ Напишите ответ — я передам его диспетчеру:');
       return;
     }
 

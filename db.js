@@ -168,6 +168,16 @@ module.exports = {
     return rows[0] ? withTypeInfo(rows[0]) : null;
   },
 
+  // Добавляет комментарий в заявку (используется ботом при ответе водителя)
+  async addTicketComment(ticketId, comment) {
+    const { rows } = await pool.query(
+      `UPDATE tickets SET comments = COALESCE(comments, '[]'::jsonb) || $1::jsonb
+       WHERE id = $2 RETURNING *`,
+      [JSON.stringify([comment]), ticketId]
+    );
+    return rows[0] ? withTypeInfo(rows[0]) : null;
+  },
+
   // Автомобиль, закреплённый за водителем. Привязка может быть указана
   // с любой стороны: в карточке водителя или в карточке машины.
   async getAssignedVehicle(userId) {
@@ -206,6 +216,18 @@ module.exports = {
        data.description, data.created_by, data.num, JSON.stringify(history)]
     );
     return withTypeInfo(rows[0]);
+  },
+
+  // Добавляет комментарий к заявке (используется ботом, когда водитель
+  // отвечает на сообщение диспетчера)
+  async addTicketComment(ticketId, comment) {
+    const { rows } = await pool.query(
+      `UPDATE tickets
+       SET comments = COALESCE(comments, '[]'::jsonb) || $1::jsonb
+       WHERE id = $2 RETURNING *`,
+      [JSON.stringify([comment]), ticketId]
+    );
+    return rows[0] ? withTypeInfo(rows[0]) : null;
   },
 
   async getNextTicketNum(companyId) {

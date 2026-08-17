@@ -41,4 +41,31 @@ async function notifyTicketStatus(ticket, newStatus) {
   return sent;
 }
 
-module.exports = { setBot, notifyTicketStatus, STATUS_LABELS };
+// Комментарий диспетчера из CRM → водителю в Telegram, с кнопкой «Ответить»
+async function notifyTicketComment(ticket, comment) {
+  if (!bot || !ticket || !ticket.created_by) return 0;
+  try {
+    const { rows } = await db.query(
+      'SELECT telegram_id FROM users WHERE id = $1 AND telegram_id IS NOT NULL',
+      [ticket.created_by]
+    );
+    if (!rows[0]) return 0;
+
+    const full = await db.getTicketById(ticket.id, ticket.company_id).catch(() => ticket);
+    const text =
+      `💬 *Комментарий по заявке ${full.num}*\n` +
+      `${full.type_icon || ''} ${full.title || full.type_name || ''}\n\n` +
+      `_${comment.author || 'Диспетчер'}:_\n${comment.text}`;
+
+    await bot.telegram.sendMessage(rows[0].telegram_id, text, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '✍️ Ответить', callback_data: `reply:${ticket.id}` }]] },
+    });
+    return 1;
+  } catch (err) {
+    console.error('[notifier] comment error:', err.message);
+    return 0;
+  }
+}
+
+module.exports = { setBot, notifyTicketStatus, notifyTicketComment, STATUS_LABELS };

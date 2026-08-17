@@ -5,7 +5,7 @@ const crypto  = require('crypto');
 const express = require('express');
 const db      = require('./db');
 const { TICKET_TYPES } = require('./ticket-types');
-const { notifyTicketStatus } = require('./notifier');
+const { notifyTicketStatus, notifyTicketComment } = require('./notifier');
 
 const router = express.Router();
 
@@ -431,13 +431,37 @@ router.patch('/tickets/:id', auth, async (req, res) => {
     );
     res.json(rows[0]);
 
-    // Статус сменился — уведомляем водителя в Telegram (после ответа, чтобы не задерживать CRM)
+    // Уведомления шлём после ответа, чтобы не задерживать CRM
     if (newStatus !== t.status) {
       notifyTicketStatus(rows[0], newStatus).catch(err =>
         console.error('[api] notify error:', err.message));
     }
+
+    // Новые комментарии диспетчера пересылаем водителю в Telegram.
+    // Внутренние заметки и ответы самого водителя не отправляем.
+    const wasCount = Array.isArray(t.comments) ? t.comments.length : 0;
+    for (const c of comments.slice(wasCount)) {
+      if (c.internal || c.fromDriver) continue;
+      notifyTicketComment(rows[0], c).catch(err =>
+        console.error('[api] comment notify error:', err.message));
+    }
   } catch (err) {
     console.error('[api] update ticket error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Свежая версия заявки — CRM подтягивает её при открытии карточки,
+// чтобы увидеть ответы водителя из бота
+router.get('/tickets/:id', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT * FROM tickets WHERE id = $1 AND company_id = $2 LIMIT 1',
+      [req.params.id, req.account.company_id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Заявка не найдена' });
+    res.json(rows[0]);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

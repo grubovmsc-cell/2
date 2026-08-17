@@ -48,6 +48,8 @@ async function initSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await addColumns('sessions', { last_used_at: 'TIMESTAMPTZ' });
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)`);
 
   // ── Водители / сотрудники ───────────────────────────────────
   await db.query(`
@@ -184,6 +186,9 @@ async function initSchema() {
   await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_company    ON tickets(company_id)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_status     ON tickets(status)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_created_by ON tickets(created_by)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_contractor ON tickets(contractor_id)`);
+  // Основная выборка — последние заявки компании
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_tickets_company_created ON tickets(company_id, created_at DESC)`);
 
   // ── Автообновление updated_at ───────────────────────────────
   await db.query(`

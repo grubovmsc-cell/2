@@ -50,11 +50,22 @@ async function startBot() {
 const app = express();
 app.use(express.json());
 
-// ─── CORS (нужно, чтобы CRM на другом домене могла звать этот API) ───────────
+// ─── CORS ────────────────────────────────────────────────────────────────────
+// CRM живёт на отдельном домене, поэтому доступ разрешаем явным списком.
+// Свои домены можно переопределить переменной ALLOWED_ORIGINS (через запятую).
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
+  'https://www.grubov.com,https://grubov.com,https://fleetdesk-crm-production.up.railway.app'
+).split(',').map(s => s.trim()).filter(Boolean);
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+  res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Notify-Secret');
+  res.header('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -100,24 +111,6 @@ app.post('/notify', checkSecret, async (req, res) => {
     res.json({ ok: true, sent });
   } catch (err) {
     console.error('[manager] /notify error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Синхронизация карточек из CRM ────────────────────────────────────────
-// CRM живёт со своими локальными данными (компании, водители) и зовёт этот
-// эндпоинт при создании/сохранении карточки водителя, чтобы бот видел его
-// company_id и Telegram-ник и мог опознать водителя при первом /start.
-app.post('/sync/driver', checkSecret, async (req, res) => {
-  const { companyId, companyName, driver } = req.body;
-  if (!companyId || !driver || !driver.name)
-    return res.status(400).json({ error: 'companyId and driver.name required' });
-  try {
-    await db.upsertCompany(companyId, companyName);
-    const result = await db.upsertUserFromCrm(companyId, driver);
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    console.error('[manager] /sync/driver error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

@@ -30,11 +30,20 @@ class MaxBot {
       if (v !== undefined && v !== null) url.searchParams.set(k, v);
     });
 
-    const res = await fetch(url, {
-      method,
-      headers: { 'Authorization': this.token, 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: { 'Authorization': this.token, 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (err) {
+      // fetch прячет причину внутрь cause — без неё непонятно, что случилось
+      const cause = err.cause || {};
+      const detail = [cause.code, cause.message].filter(Boolean).join(' ');
+      // не доверяем сертификату / домен недоступен / соединение отклонено
+      throw new Error(`${err.message}${detail ? ' — ' + detail : ''} (${url.host})`);
+    }
 
     const text = await res.text();
     let data = null;

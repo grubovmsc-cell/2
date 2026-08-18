@@ -143,6 +143,11 @@ async function initSchema() {
     fines_count:     'INTEGER NOT NULL DEFAULT 0',
     accidents_count: 'INTEGER NOT NULL DEFAULT 0',
   });
+  // Мессенджер MAX — второй канал связи с водителем наравне с Telegram
+  await addColumns('users', { max_id: 'TEXT', max_username: 'TEXT' });
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_max_id ON users(max_id) WHERE max_id IS NOT NULL`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_users_max_username ON users(LOWER(max_username))`);
+
   await db.query(`CREATE INDEX IF NOT EXISTS idx_users_company  ON users(company_id)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_id)`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_users_tg_username ON users(LOWER(telegram_username))`);

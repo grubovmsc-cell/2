@@ -10,13 +10,18 @@ const { router: driverRouter } = require('./driver');
 const { router: adminRouter, ensureFirstAdmin } = require('./admin');
 const notifier = require('./notifier');
 
+const { MaxBot } = require('./max-bot');
+
 const NOTIFY_PORT   = parseInt(process.env.NOTIFY_PORT   || '3001');
 const NOTIFY_SECRET = process.env.NOTIFY_SECRET || '';
-const BOT_TOKEN      = process.env.BOT_TOKEN || '';
+const BOT_TOKEN     = process.env.BOT_TOKEN || '';
+const MAX_BOT_TOKEN = process.env.MAX_BOT_TOKEN || '';
 
-// ─── Единый бот на все компании ───────────────────────────────────────────
+// ─── Боты: Telegram и MAX, оба на все компании ────────────────────────────
 let bot = null;
 let botUsername = '';
+let maxBot = null;
+let maxUsername = '';
 
 const STATUS_LABELS = {
   NEW: '🆕 Новая', IN_PROGRESS: '🔧 В работе',
@@ -42,10 +47,27 @@ async function startBot() {
     });
     launch();
     notifier.setBot(bot);
-    console.log(`[manager] ✅ Бот запущен: @${botUsername}`);
+    console.log(`[manager] ✅ Telegram-бот запущен: @${botUsername}`);
   } catch (err) {
     bot = null;
     console.error('[manager] ❌ Failed to start bot:', err.message);
+  }
+}
+
+async function startMaxBot() {
+  if (!MAX_BOT_TOKEN) {
+    console.log('[manager] MAX_BOT_TOKEN не задан — бот MAX не запущен.');
+    return;
+  }
+  try {
+    maxBot = new MaxBot(MAX_BOT_TOKEN);
+    const me = await maxBot.launch();
+    maxUsername = me.username || '';
+    notifier.setMaxBot(maxBot);
+    console.log(`[manager] ✅ MAX-бот запущен: @${maxUsername}`);
+  } catch (err) {
+    maxBot = null;
+    console.error('[manager] ❌ Не удалось запустить MAX-бот:', err.message);
   }
 }
 
@@ -122,16 +144,30 @@ app.post('/notify', checkSecret, async (req, res) => {
   }
 });
 
-// Отдаёт CRM данные общего бота — чтобы показать готовую ссылку-приглашение.
+// Отдаёт CRM данные ботов — чтобы показать готовые ссылки-приглашения.
 app.get('/bot-info', (req, res) => {
-  res.json({ ok: !!bot, username: botUsername, link: botUsername ? `https://t.me/${botUsername}` : '' });
+  res.json({
+    ok: !!bot,
+    username: botUsername,
+    link: botUsername ? `https://t.me/${botUsername}` : '',
+    max: {
+      ok: !!maxBot,
+      username: maxUsername,
+      link: maxUsername ? `https://max.ru/${maxUsername}` : '',
+    },
+  });
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, active: !!bot, username: botUsername }));
+app.get('/health', (_, res) => res.json({
+  ok: true,
+  active: !!bot, username: botUsername,
+  maxActive: !!maxBot, maxUsername,
+}));
 
 async function shutdown(signal) {
-  console.log(`\n[manager] ${signal} received. Stopping bot...`);
+  console.log(`\n[manager] ${signal} received. Stopping bots...`);
   if (bot) { try { await bot.stop(); } catch {} }
+  if (maxBot) { try { maxBot.stop(); } catch {} }
   process.exit(0);
 }
 process.once('SIGINT',  () => shutdown('SIGINT'));
@@ -148,6 +184,7 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
   }
   await ensureFirstAdmin();
   await startBot();
+  await startMaxBot();
   app.listen(NOTIFY_PORT, () => {
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
     console.log(`  /api/auth/*         — регистрация, вход, сессия`);

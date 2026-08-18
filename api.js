@@ -274,7 +274,7 @@ router.get('/bootstrap', auth, async (req, res) => {
 // ─── Водители ──────────────────────────────────────────────────────────────
 const DRIVER_FIELDS = [
   'name', 'email', 'phone', 'status', 'initials', 'color',
-  'telegram_username', 'license_number', 'license_category', 'license_expires',
+  'telegram_username', 'max_username', 'license_number', 'license_category', 'license_expires',
   'medical_expires', 'medical_date', 'briefing_date', 'tachograph', 'has_tachograph',
   'has_waybill', 'fuel_card', 'transponder', 'assigned_vehicle',
   'driving_style', 'fuel_per_100km', 'fines_count', 'accidents_count',
@@ -289,6 +289,7 @@ function driverValues(body) {
     initials:          body.initials || initialsOf(body.name),
     color:             body.color || pickColor(),
     telegram_username: nz(String(body.telegram || body.telegram_username || '').replace(/^@/, '').trim()),
+    max_username:      nz(String(body.max || body.max_username || '').replace(/^@/, '').trim()),
     license_number:    nz(body.license_number),
     license_category:  nz(body.license_category),
     license_expires:   nz(body.license_expires),

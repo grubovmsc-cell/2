@@ -52,6 +52,30 @@ module.exports = {
     return rows[0] || null;
   },
 
+  // ── MAX ─────────────────────────────────────────────────────
+  async getUserByMaxId(maxId) {
+    const { rows } = await pool.query(
+      'SELECT * FROM users WHERE max_id = $1 LIMIT 1', [String(maxId)]
+    );
+    return rows[0] || null;
+  },
+
+  async getUserByMaxUsername(username) {
+    const clean = String(username || '').replace(/^@/, '').trim();
+    if (!clean) return null;
+    const { rows } = await pool.query(
+      'SELECT * FROM users WHERE LOWER(max_username) = LOWER($1) LIMIT 1', [clean]
+    );
+    return rows[0] || null;
+  },
+
+  async linkMax(userId, maxId, maxUsername) {
+    await pool.query(
+      'UPDATE users SET max_id = $1, max_username = COALESCE($2, max_username) WHERE id = $3',
+      [String(maxId), maxUsername || null, userId]
+    );
+  },
+
   async getUserByEmail(email) {
     const { rows } = await pool.query(
       'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',

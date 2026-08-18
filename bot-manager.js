@@ -7,6 +7,7 @@ const { createBot }  = require('./bot');
 const { initSchema } = require('./schema');
 const { router: apiRouter } = require('./api');
 const { router: driverRouter } = require('./driver');
+const { router: adminRouter, ensureFirstAdmin } = require('./admin');
 const notifier = require('./notifier');
 
 const NOTIFY_PORT   = parseInt(process.env.NOTIFY_PORT   || '3001');
@@ -74,8 +75,9 @@ app.use((req, res, next) => {
 });
 
 // ─── REST API для CRM (аккаунты, водители, ТС, заявки, подрядчики) ────────
-// Кабинет водителя объявляем первым — у него свой способ авторизации
+// Кабинет водителя и админку объявляем первыми — у них свои способы входа
 app.use('/api/driver', driverRouter);
+app.use('/api/admin', adminRouter);
 app.use('/api', apiRouter);
 
 function checkSecret(req, res, next) {
@@ -144,6 +146,7 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
   } catch (err) {
     console.error('[schema] ❌ Schema init error:', err.message);
   }
+  await ensureFirstAdmin();
   await startBot();
   app.listen(NOTIFY_PORT, () => {
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
@@ -151,6 +154,7 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
     console.log(`  /api/bootstrap      — все данные компании`);
     console.log(`  /api/import/*       — массовая загрузка из таблицы`);
     console.log(`  /api/driver/*       — личный кабинет водителя`);
+    console.log(`  /api/admin/*        — панель администратора`);
     console.log(`  /api/drivers|vehicles|tickets|contractors — CRUD`);
     console.log(`  POST /notify        — уведомить водителей о смене статуса`);
     console.log(`  GET  /bot-info      — юзернейм и ссылка общего бота`);

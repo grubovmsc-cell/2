@@ -7,6 +7,7 @@ const db      = require('./db');
 const { TICKET_TYPES } = require('./ticket-types');
 const { notifyTicketStatus, notifyTicketComment, notifyTicketContractor } = require('./notifier');
 const { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles } = require('./import');
+const activity = require('./activity');
 
 const router = express.Router();
 
@@ -89,7 +90,7 @@ async function auth(req, res, next) {
   try {
     const { rows } = await db.query(
       `SELECT a.id, a.company_id, a.email, a.name, a.initials, c.name AS company_name,
-              s.last_used_at
+              c.blocked_at, s.last_used_at
        FROM sessions s
        JOIN accounts a ON a.id = s.account_id
        JOIN companies c ON c.id = a.company_id
@@ -99,6 +100,8 @@ async function auth(req, res, next) {
       [token]
     );
     if (!rows[0]) return res.status(401).json({ error: 'Сессия истекла, войдите заново' });
+    if (rows[0].blocked_at)
+      return res.status(403).json({ error: 'Доступ приостановлен. Свяжитесь с поддержкой.' });
     req.account = rows[0];
 
     // Продлеваем сессию не чаще раза в час, чтобы не писать в БД на каждый запрос
@@ -164,10 +167,13 @@ router.post('/auth/register', async (req, res) => {
     );
 
     const token = await createSession(rows[0].id);
-    res.json(accountPayload({
+    const account = {
       id: rows[0].id, company_id: companyId, email, name,
       initials: initialsOf(name), company_name: companyName,
-    }, token));
+    };
+    req.account = account;
+    activity.log(req, 'register', { entity: 'company', entityId: companyId, details: companyName });
+    res.json(accountPayload(account, token));
   } catch (err) {
     console.error('[api] register error:', err.message);
     res.status(500).json({ error: err.message });
@@ -189,7 +195,7 @@ router.post('/auth/login', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT a.*, c.name AS company_name FROM accounts a
+      `SELECT a.*, c.name AS company_name, c.blocked_at FROM accounts a
        JOIN companies c ON c.id = a.company_id
        WHERE LOWER(a.email) = LOWER($1) LIMIT 1`,
       [email]
@@ -197,10 +203,14 @@ router.post('/auth/login', async (req, res) => {
     const acc = rows[0];
     if (!acc || !verifyPassword(password, acc.password_hash)) {
       registerFailedLogin(keys);
+      activity.logLogin(req, acc, false);
       return res.status(401).json({ error: 'Неверный email или пароль' });
     }
+    if (acc.blocked_at)
+      return res.status(403).json({ error: 'Доступ приостановлен. Свяжитесь с поддержкой.' });
 
     clearLoginAttempts(keys);
+    activity.logLogin(req, acc, true);
     const token = await createSession(acc.id);
     res.json(accountPayload(acc, token));
   } catch (err) {
@@ -307,6 +317,7 @@ router.post('/drivers', auth, async (req, res) => {
       `INSERT INTO users (company_id, ${cols}) VALUES ($1, ${ph}) RETURNING *`,
       [req.account.company_id, ...DRIVER_FIELDS.map(f => v[f])]
     );
+    activity.log(req, 'driver_create', { entity: 'driver', entityId: rows[0].id, details: v.name });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] create driver error:', err.message);
@@ -324,6 +335,7 @@ router.patch('/drivers/:id', auth, async (req, res) => {
       [...DRIVER_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Водитель не найден' });
+    activity.log(req, 'driver_update', { entity: 'driver', entityId: rows[0].id, details: v.name });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] update driver error:', err.message);
@@ -332,8 +344,10 @@ router.patch('/drivers/:id', auth, async (req, res) => {
 });
 
 router.delete('/drivers/:id', auth, async (req, res) => {
-  await db.query('DELETE FROM users WHERE id = $1 AND company_id = $2',
+  const { rows } = await db.query(
+    'DELETE FROM users WHERE id = $1 AND company_id = $2 RETURNING name',
     [req.params.id, req.account.company_id]);
+  activity.log(req, 'driver_delete', { entity: 'driver', entityId: req.params.id, details: rows[0]?.name });
   res.json({ ok: true });
 });
 
@@ -393,6 +407,7 @@ router.post('/vehicles', auth, async (req, res) => {
       `INSERT INTO vehicles (company_id, ${cols}) VALUES ($1, ${ph}) RETURNING *`,
       [req.account.company_id, ...VEHICLE_FIELDS.map(f => v[f])]
     );
+    activity.log(req, 'vehicle_create', { entity: 'vehicle', entityId: rows[0].id, details: v.plate });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] create vehicle error:', err.message);
@@ -410,6 +425,7 @@ router.patch('/vehicles/:id', auth, async (req, res) => {
       [...VEHICLE_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Автомобиль не найден' });
+    activity.log(req, 'vehicle_update', { entity: 'vehicle', entityId: rows[0].id, details: v.plate });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] update vehicle error:', err.message);
@@ -418,8 +434,10 @@ router.patch('/vehicles/:id', auth, async (req, res) => {
 });
 
 router.delete('/vehicles/:id', auth, async (req, res) => {
-  await db.query('DELETE FROM vehicles WHERE id = $1 AND company_id = $2',
+  const { rows } = await db.query(
+    'DELETE FROM vehicles WHERE id = $1 AND company_id = $2 RETURNING plate',
     [req.params.id, req.account.company_id]);
+  activity.log(req, 'vehicle_delete', { entity: 'vehicle', entityId: req.params.id, details: rows[0]?.plate });
   res.json({ ok: true });
 });
 
@@ -452,6 +470,7 @@ router.post('/contractors', auth, async (req, res) => {
        VALUES ($1, ${CONTRACTOR_FIELDS.map((_, i) => `$${i + 2}`).join(', ')}) RETURNING *`,
       [req.account.company_id, ...CONTRACTOR_FIELDS.map(f => v[f])]
     );
+    activity.log(req, 'contractor_create', { entity: 'contractor', entityId: rows[0].id, details: v.name });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] create contractor error:', err.message);
@@ -469,6 +488,7 @@ router.patch('/contractors/:id', auth, async (req, res) => {
       [...CONTRACTOR_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Подрядчик не найден' });
+    activity.log(req, 'contractor_update', { entity: 'contractor', entityId: rows[0].id, details: v.name });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] update contractor error:', err.message);
@@ -477,8 +497,10 @@ router.patch('/contractors/:id', auth, async (req, res) => {
 });
 
 router.delete('/contractors/:id', auth, async (req, res) => {
-  await db.query('DELETE FROM contractors WHERE id = $1 AND company_id = $2',
+  const { rows } = await db.query(
+    'DELETE FROM contractors WHERE id = $1 AND company_id = $2 RETURNING name',
     [req.params.id, req.account.company_id]);
+  activity.log(req, 'contractor_delete', { entity: 'contractor', entityId: req.params.id, details: rows[0]?.name });
   res.json({ ok: true });
 });
 
@@ -507,6 +529,7 @@ router.post('/tickets', auth, async (req, res) => {
        nz(b.userId || b.created_by), nz(b.contractorId || b.contractor_id),
        nz(b.due), JSON.stringify(history)]
     );
+    activity.log(req, 'ticket_create', { entity: 'ticket', entityId: rows[0].id, details: `${rows[0].num} · ${rows[0].title || ''}` });
     res.json(rows[0]);
   } catch (err) {
     console.error('[api] create ticket error:', err.message);
@@ -546,6 +569,11 @@ router.patch('/tickets/:id', auth, async (req, res) => {
        req.params.id, cid]
     );
     res.json(rows[0]);
+
+    activity.log(req, 'ticket_update', {
+      entity: 'ticket', entityId: rows[0].id,
+      details: `${rows[0].num}${newStatus !== t.status ? ' · статус: ' + newStatus : ''}`,
+    });
 
     // Уведомления шлём после ответа, чтобы не задерживать CRM
     if (newStatus !== t.status) {
@@ -623,6 +651,9 @@ router.post('/import/:kind', auth, async (req, res) => {
     const result = kind === 'drivers'
       ? await importDrivers(req.account.company_id, rows)
       : await importVehicles(req.account.company_id, rows);
+    activity.log(req, `import_${kind}`, {
+      details: `создано ${result.created}, обновлено ${result.updated}, пропущено ${result.skipped}`,
+    });
     res.json(result);
   } catch (err) {
     console.error('[api] import error:', err.message);

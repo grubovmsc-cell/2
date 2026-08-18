@@ -51,6 +51,51 @@ async function initSchema() {
   await addColumns('sessions', { last_used_at: 'TIMESTAMPTZ' });
   await db.query(`CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)`);
 
+  // ── Администраторы сервиса ──────────────────────────────────
+  // Отдельный вход, не связанный с аккаунтами компаний
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS admins (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      email         TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      name          TEXT NOT NULL DEFAULT 'Администратор',
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_login_at TIMESTAMPTZ
+    )
+  `);
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_admins_email ON admins(LOWER(email))`);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      token        TEXT PRIMARY KEY,
+      admin_id     UUID NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    )
+  `);
+
+  // ── Журнал действий ─────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id         BIGSERIAL PRIMARY KEY,
+      company_id TEXT,
+      account_id UUID,
+      actor      TEXT,
+      action     TEXT NOT NULL,
+      entity     TEXT,
+      entity_id  TEXT,
+      details    TEXT,
+      ip         TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_activity_company ON activity_log(company_id, created_at DESC)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_log(account_id, created_at DESC)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at DESC)`);
+
+  // Блокировка компании — обратимая альтернатива удалению
+  await addColumns('companies', { blocked_at: 'TIMESTAMPTZ', note: 'TEXT' });
+
   // ── Личный кабинет водителя ─────────────────────────────────
   // Токен выдаёт бот — личность водителя уже подтверждена Telegram
   await db.query(`

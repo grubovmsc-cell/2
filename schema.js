@@ -108,6 +108,8 @@ async function initSchema() {
     email:          'TEXT',
     website:        'TEXT',
     director:       'TEXT',
+    // Настройки уведомлений водителям — см. notifications.js
+    notifications:  "JSONB NOT NULL DEFAULT '{}'::jsonb",
   });
 
   // Роли и приглашения сотрудников

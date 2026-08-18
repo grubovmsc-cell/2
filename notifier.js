@@ -4,6 +4,7 @@
 'use strict';
 const db = require('./db');
 const { CHANNELS, BOT_CHANNELS, availableFor } = require('./channels');
+const { shouldSend } = require('./notifications');
 
 // Отправители по каналам: ключ → функция (externalId, text, opts)
 const senders = new Map();
@@ -37,7 +38,10 @@ const STATUS_LABELS = {
 // Единая точка отправки.
 // prefer — канал, из которого пришла заявка: отвечаем туда же, где водитель
 // начал разговор. Если он там больше не подключён, доставляем куда сможем.
-async function sendToUser(userId, text, { buttons, prefer } = {}) {
+async function sendToUser(userId, text, { buttons, prefer, event, companyId } = {}) {
+  // Компания могла отключить этот тип уведомлений или включить тихие часы
+  if (event && !(await shouldSend(companyId, event))) return 0;
+
   const fields = BOT_CHANNELS.map(c => c.idField).join(', ');
   const { rows } = await db.query(
     `SELECT ${fields} FROM users WHERE id = $1`, [userId]
@@ -78,7 +82,11 @@ async function notifyTicketStatus(ticket, newStatus) {
     `${full.description ? full.description.slice(0, 100) : ''}`;
 
   let sent = 0;
-  for (const uid of recipients) sent += await sendToUser(uid, text, { prefer: full.channel });
+  for (const uid of recipients) {
+    sent += await sendToUser(uid, text, {
+      prefer: full.channel, event: 'ticket_status', companyId: ticket.company_id,
+    });
+  }
   return sent;
 }
 
@@ -94,7 +102,7 @@ async function notifyTicketComment(ticket, comment) {
 
   return sendToUser(ticket.created_by, text, {
     buttons: [[{ text: '✍️ Ответить', data: `reply:${ticket.id}` }]],
-    prefer: full.channel,
+    prefer: full.channel, event: 'ticket_comment', companyId: ticket.company_id,
   });
 }
 
@@ -122,7 +130,9 @@ async function notifyTicketContractor(ticket, contractorId) {
   if (c.work_hours)     lines.push(`🕒 Часы работы: ${c.work_hours}`);
   if (c.notes)          lines.push('', `_${c.notes}_`);
 
-  return sendToUser(ticket.created_by, lines.join('\n'), { prefer: full.channel });
+  return sendToUser(ticket.created_by, lines.join('\n'), {
+    prefer: full.channel, event: 'ticket_contractor', companyId: ticket.company_id,
+  });
 }
 
 module.exports = {

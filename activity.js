@@ -51,6 +51,15 @@ const ACTION_LABELS = {
   ticket_delete:    'Удалена заявка',
   import_drivers:   'Загрузка водителей из файла',
   import_vehicles:  'Загрузка автомобилей из файла',
+  broadcast:        'Рассылка сотрудникам',
+  company_update:   'Изменены данные компании',
+  profile_update:   'Изменён профиль',
+  password_change:  'Смена пароля',
+  notifications_update: 'Изменены настройки уведомлений',
+  team_invite:      'Приглашён сотрудник',
+  team_role_change: 'Изменена роль сотрудника',
+  team_remove:      'Удалён доступ сотрудника',
+  invite_accepted:  'Сотрудник принял приглашение',
 
   // Действия администратора сервиса
   admin_company_update:   'Админ: изменена компания',

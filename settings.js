@@ -66,6 +66,40 @@ router.patch('/company', requirePermission('company:edit'), async (req, res) => 
   }
 });
 
+// ─── Уведомления водителям ─────────────────────────────────────────────────
+const notifications = require('./notifications');
+
+router.get('/notifications', async (req, res) => {
+  try {
+    const value = await notifications.getSettings(req.account.company_id);
+    res.json({ settings: value, events: notifications.EVENTS });
+  } catch (err) {
+    res.status(500).json({ error: 'Не удалось загрузить настройки' });
+  }
+});
+
+router.patch('/notifications', requirePermission('company:edit'), async (req, res) => {
+  const b = req.body || {};
+  // Принимаем только известные ключи — мусор в базу не пускаем
+  const clean = {};
+  notifications.EVENTS.forEach(e => { clean[e.key] = b[e.key] !== false; });
+  clean.docs_days     = Math.min(Math.max(parseInt(b.docs_days, 10) || 14, 1), 90);
+  clean.quiet_enabled = !!b.quiet_enabled;
+  clean.quiet_from    = /^\d{2}:\d{2}$/.test(b.quiet_from) ? b.quiet_from : '21:00';
+  clean.quiet_to      = /^\d{2}:\d{2}$/.test(b.quiet_to)   ? b.quiet_to   : '08:00';
+
+  try {
+    await db.query('UPDATE companies SET notifications = $1 WHERE id = $2',
+      [JSON.stringify(clean), req.account.company_id]);
+    notifications.invalidate(req.account.company_id);
+    activity.log(req, 'notifications_update');
+    res.json({ settings: clean });
+  } catch (err) {
+    console.error('[settings] notifications error:', err.message);
+    res.status(500).json({ error: 'Не удалось сохранить' });
+  }
+});
+
 // ─── Свой профиль ──────────────────────────────────────────────────────────
 router.patch('/profile', async (req, res) => {
   const b = req.body || {};

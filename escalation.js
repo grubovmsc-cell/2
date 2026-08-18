@@ -32,8 +32,9 @@ async function escalateStaleTickets() {
         `По ней больше ${STALE_HOURS} часов нет движения.\n` +
         `${t.title || ''}\n\n` +
         `Диспетчер уведомлён.`;
-      notifier.sendToUser(t.created_by, text, { prefer: t.channel })
-        .catch(err => console.error('[escalation] notify error:', err.message));
+      notifier.sendToUser(t.created_by, text, {
+        prefer: t.channel, event: 'ticket_urgent', companyId: t.company_id,
+      }).catch(err => console.error('[escalation] notify error:', err.message));
     }
   } catch (err) {
     console.error('[escalation] error:', err.message);

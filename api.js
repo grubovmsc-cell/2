@@ -5,8 +5,10 @@ const crypto  = require('crypto');
 const express = require('express');
 const db      = require('./db');
 const { TICKET_TYPES } = require('./ticket-types');
-const { notifyTicketStatus, notifyTicketComment, notifyTicketContractor } = require('./notifier');
-const { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles } = require('./import');
+const notifier = require('./notifier');
+const { notifyTicketStatus, notifyTicketComment, notifyTicketContractor } = notifier;
+const { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles,
+        syncAssignments } = require('./import');
 const activity = require('./activity');
 
 const router = express.Router();
@@ -324,6 +326,42 @@ router.get('/bootstrap', auth, async (req, res) => {
   }
 });
 
+// ─── Связь водителя и автомобиля ───────────────────────────────────────────
+// Привязка хранится с обеих сторон (users.assigned_vehicle и
+// vehicles.assigned_user_id). Чтобы стороны не разошлись, любое назначение
+// проводим через эту функцию: она снимает прежние связи и ставит новую.
+async function syncAssignment(companyId, { userId, vehicleId }) {
+  try {
+    if (userId) {
+      // Освобождаем машину, которая была за этим водителем
+      await db.query(
+        `UPDATE vehicles SET assigned_user_id = NULL
+         WHERE company_id = $1 AND assigned_user_id = $2 AND ($3::uuid IS NULL OR id <> $3)`,
+        [companyId, userId, vehicleId || null]
+      );
+      await db.query(
+        'UPDATE users SET assigned_vehicle = $1 WHERE id = $2 AND company_id = $3',
+        [vehicleId || null, userId, companyId]
+      );
+    }
+
+    if (vehicleId) {
+      // Освобождаем водителя, за которым была закреплена эта машина
+      await db.query(
+        `UPDATE users SET assigned_vehicle = NULL
+         WHERE company_id = $1 AND assigned_vehicle = $2 AND ($3::uuid IS NULL OR id <> $3)`,
+        [companyId, vehicleId, userId || null]
+      );
+      await db.query(
+        'UPDATE vehicles SET assigned_user_id = $1 WHERE id = $2 AND company_id = $3',
+        [userId || null, vehicleId, companyId]
+      );
+    }
+  } catch (err) {
+    console.error('[api] sync assignment error:', err.message);
+  }
+}
+
 // ─── Водители ──────────────────────────────────────────────────────────────
 const DRIVER_FIELDS = [
   'name', 'email', 'phone', 'status', 'initials', 'color',
@@ -372,6 +410,7 @@ router.post('/drivers', auth, async (req, res) => {
       `INSERT INTO users (company_id, ${cols}) VALUES ($1, ${ph}) RETURNING *`,
       [req.account.company_id, ...DRIVER_FIELDS.map(f => v[f])]
     );
+    await syncAssignment(req.account.company_id, { userId: rows[0].id, vehicleId: v.assigned_vehicle });
     activity.log(req, 'driver_create', { entity: 'driver', entityId: rows[0].id, details: v.name });
     res.json(rows[0]);
   } catch (err) {
@@ -390,8 +429,9 @@ router.patch('/drivers/:id', auth, async (req, res) => {
       [...DRIVER_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Водитель не найден' });
+    await syncAssignment(req.account.company_id, { userId: rows[0].id, vehicleId: v.assigned_vehicle });
     activity.log(req, 'driver_update', { entity: 'driver', entityId: rows[0].id, details: v.name });
-    res.json(rows[0]);
+    res.json({ ...rows[0], assigned_vehicle: v.assigned_vehicle });
   } catch (err) {
     console.error('[api] update driver error:', err.message);
     res.status(500).json({ error: err.message });
@@ -462,6 +502,7 @@ router.post('/vehicles', auth, async (req, res) => {
       `INSERT INTO vehicles (company_id, ${cols}) VALUES ($1, ${ph}) RETURNING *`,
       [req.account.company_id, ...VEHICLE_FIELDS.map(f => v[f])]
     );
+    await syncAssignment(req.account.company_id, { vehicleId: rows[0].id, userId: v.assigned_user_id });
     activity.log(req, 'vehicle_create', { entity: 'vehicle', entityId: rows[0].id, details: v.plate });
     res.json(rows[0]);
   } catch (err) {
@@ -480,8 +521,9 @@ router.patch('/vehicles/:id', auth, async (req, res) => {
       [...VEHICLE_FIELDS.map(f => v[f]), req.params.id, req.account.company_id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Автомобиль не найден' });
+    await syncAssignment(req.account.company_id, { vehicleId: rows[0].id, userId: v.assigned_user_id });
     activity.log(req, 'vehicle_update', { entity: 'vehicle', entityId: rows[0].id, details: v.plate });
-    res.json(rows[0]);
+    res.json({ ...rows[0], assigned_user_id: v.assigned_user_id });
   } catch (err) {
     console.error('[api] update vehicle error:', err.message);
     res.status(500).json({ error: err.message });
@@ -691,6 +733,68 @@ router.delete('/tickets/:id', auth, async (req, res) => {
   }
 });
 
+// ─── Рассылка сотрудникам ──────────────────────────────────────────────────
+// Кому можно отправить: показываем список с отметкой о подключении
+router.get('/broadcast/recipients', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, phone, status, telegram_id, max_id, telegram_username, max_username,
+              assigned_vehicle
+       FROM users WHERE company_id = $1 ORDER BY name`,
+      [req.account.company_id]
+    );
+    res.json({ recipients: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/broadcast', auth, async (req, res) => {
+  const b = req.body || {};
+  const text = String(b.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Введите текст сообщения' });
+  if (text.length > 3000) return res.status(400).json({ error: 'Слишком длинное сообщение' });
+
+  try {
+    // Отбираем получателей и заодно проверяем, что все они из этой компании
+    const params = [req.account.company_id];
+    let where = 'company_id = $1';
+    if (Array.isArray(b.userIds) && b.userIds.length) {
+      params.push(b.userIds);
+      where += ' AND id = ANY($2::uuid[])';
+    } else if (b.onlyActive) {
+      where += " AND status = 'active'";
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, name FROM users WHERE ${where} AND (telegram_id IS NOT NULL OR max_id IS NOT NULL)`,
+      params
+    );
+
+    if (!rows.length)
+      return res.status(400).json({ error: 'Среди выбранных нет подключённых к боту' });
+
+    const message = `📢 *Сообщение от диспетчера*\n\n${text}`;
+    const result = { total: rows.length, sent: 0, failed: [] };
+
+    // Отправляем по очереди: у мессенджеров есть ограничение на частоту
+    for (const u of rows) {
+      const ok = await notifier.sendToUser(u.id, message, { companyId: req.account.company_id });
+      if (ok) result.sent++;
+      else result.failed.push(u.name);
+      await new Promise(r => setTimeout(r, 60));
+    }
+
+    activity.log(req, 'broadcast', {
+      details: `${result.sent} из ${result.total}: ${text.slice(0, 80)}`,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[api] broadcast error:', err.message);
+    res.status(500).json({ error: 'Не удалось отправить рассылку' });
+  }
+});
+
 // ─── Массовая загрузка из таблицы ──────────────────────────────────────────
 // Описание колонок — фронтенд по нему строит шаблон и разбирает файл
 router.get('/import/columns', auth, (req, res) => {
@@ -720,6 +824,7 @@ router.post('/import/:kind', auth, async (req, res) => {
     const result = kind === 'drivers'
       ? await importDrivers(req.account.company_id, rows)
       : await importVehicles(req.account.company_id, rows);
+    await syncAssignments(req.account.company_id);
     activity.log(req, `import_${kind}`, {
       details: `создано ${result.created}, обновлено ${result.updated}, пропущено ${result.skipped}`,
     });

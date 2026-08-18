@@ -346,4 +346,29 @@ async function importVehicles(companyId, rows) {
   return result;
 }
 
-module.exports = { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles };
+// После массовой загрузки выравниваем связи водитель↔машина: в файле
+// могли указать привязку только с одной стороны
+async function syncAssignments(companyId) {
+  try {
+    await db.query(
+      `UPDATE vehicles v SET assigned_user_id = u.id
+       FROM users u
+       WHERE u.company_id = $1 AND v.company_id = $1
+         AND u.assigned_vehicle = v.id
+         AND (v.assigned_user_id IS DISTINCT FROM u.id)`,
+      [companyId]
+    );
+    await db.query(
+      `UPDATE users u SET assigned_vehicle = v.id
+       FROM vehicles v
+       WHERE u.company_id = $1 AND v.company_id = $1
+         AND v.assigned_user_id = u.id
+         AND (u.assigned_vehicle IS DISTINCT FROM v.id)`,
+      [companyId]
+    );
+  } catch (err) {
+    console.error('[import] sync assignments error:', err.message);
+  }
+}
+
+module.exports = { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles, syncAssignments };

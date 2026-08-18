@@ -23,7 +23,8 @@ const T = {
 function mainMenu() {
   return Markup.keyboard([
     ['📝 Новая заявка',  '📋 Мои заявки'],
-    ['👤 Мой профиль',  'ℹ️ Помощь'],
+    ['🚗 Мой кабинет',   '👤 Мой профиль'],
+    ['ℹ️ Помощь'],
   ]).resize();
 }
 
@@ -115,7 +116,7 @@ function createBot(token) {
 
     // Нажатие кнопки меню всегда прерывает текущий диалог, иначе «Мой профиль»
     // улетал бы в проверку e-mail или в описание заявки
-    const MENU_BUTTONS = ['📝 Новая заявка', '📋 Мои заявки', '👤 Мой профиль', 'ℹ️ Помощь'];
+    const MENU_BUTTONS = ['📝 Новая заявка', '📋 Мои заявки', '🚗 Мой кабинет', '👤 Мой профиль', 'ℹ️ Помощь'];
     if (MENU_BUTTONS.includes(text)) {
       session.step = null;
       session.editingField = null;
@@ -223,11 +224,13 @@ function createBot(token) {
     if (text === '📝 Новая заявка') { await startNewTicket(ctx, session.companyId, session); return; }
     if (text === '📋 Мои заявки')   { await showMyTickets(ctx, session.userId, session.companyId); return; }
     if (text === '👤 Мой профиль')  { await showProfile(ctx, session.userId); return; }
+    if (text === '🚗 Мой кабинет')  { await sendCabinetLink(ctx, session.userId); return; }
     if (text === 'ℹ️ Помощь') {
       await ctx.reply(
         `ℹ️ *FleetDesk Bot — помощь*\n\n` +
         `📝 *Новая заявка* — создать заявку на ТО, ремонт, шины и т.д.\n` +
         `📋 *Мои заявки* — список ваших активных и последних заявок.\n` +
+        `🚗 *Мой кабинет* — данные автомобиля, пробег, документы.\n` +
         `👤 *Мой профиль* — просмотр и редактирование данных водителя.\n\n` +
         `По вопросам: обращайтесь к диспетчеру.`,
         { parse_mode: 'Markdown', ...mainMenu() }
@@ -374,6 +377,27 @@ async function showMyTickets(ctx, userId, companyId) {
   } catch (err) {
     console.error('[bot] showMyTickets error:', err.message);
     await ctx.reply('⚠️ Не удалось загрузить заявки.');
+  }
+}
+
+// Выдаёт водителю персональную ссылку на кабинет.
+// Регистрация не нужна: Telegram уже подтвердил, кто это.
+async function sendCabinetLink(ctx, userId) {
+  try {
+    const { createDriverLink } = require('./driver');
+    const link = await createDriverLink(userId);
+    await ctx.reply(
+      `🚗 *Ваш личный кабинет*\n\n` +
+      `Здесь можно посмотреть данные своей машины, внести пробег и обновить документы.\n\n` +
+      `Ссылка личная — не пересылайте её другим.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([[Markup.button.url('Открыть кабинет', link)]]),
+      }
+    );
+  } catch (err) {
+    console.error('[bot] cabinet link error:', err.message);
+    await ctx.reply('⚠️ Не удалось открыть кабинет. Попробуйте позже.', mainMenu());
   }
 }
 

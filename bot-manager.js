@@ -6,6 +6,7 @@ const db      = require('./db');
 const { createBot }  = require('./bot');
 const { initSchema } = require('./schema');
 const { router: apiRouter } = require('./api');
+const { router: driverRouter } = require('./driver');
 const notifier = require('./notifier');
 
 const NOTIFY_PORT   = parseInt(process.env.NOTIFY_PORT   || '3001');
@@ -48,7 +49,9 @@ async function startBot() {
 }
 
 const app = express();
-app.use(express.json());
+// Файл импорта приходит уже разобранным в JSON — тысяча строк может весить
+// заметно больше стандартного лимита в 100 КБ
+app.use(express.json({ limit: '10mb' }));
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 // CRM живёт на отдельном домене, поэтому доступ разрешаем явным списком.
@@ -71,6 +74,8 @@ app.use((req, res, next) => {
 });
 
 // ─── REST API для CRM (аккаунты, водители, ТС, заявки, подрядчики) ────────
+// Кабинет водителя объявляем первым — у него свой способ авторизации
+app.use('/api/driver', driverRouter);
 app.use('/api', apiRouter);
 
 function checkSecret(req, res, next) {
@@ -144,6 +149,8 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
     console.log(`  /api/auth/*         — регистрация, вход, сессия`);
     console.log(`  /api/bootstrap      — все данные компании`);
+    console.log(`  /api/import/*       — массовая загрузка из таблицы`);
+    console.log(`  /api/driver/*       — личный кабинет водителя`);
     console.log(`  /api/drivers|vehicles|tickets|contractors — CRUD`);
     console.log(`  POST /notify        — уведомить водителей о смене статуса`);
     console.log(`  GET  /bot-info      — юзернейм и ссылка общего бота`);

@@ -51,6 +51,18 @@ async function initSchema() {
   await addColumns('sessions', { last_used_at: 'TIMESTAMPTZ' });
   await db.query(`CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)`);
 
+  // ── Личный кабинет водителя ─────────────────────────────────
+  // Токен выдаёт бот — личность водителя уже подтверждена Telegram
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS driver_sessions (
+      token        TEXT PRIMARY KEY,
+      user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_driver_sessions_user ON driver_sessions(user_id)`);
+
   // ── Водители / сотрудники ───────────────────────────────────
   await db.query(`
     CREATE TABLE IF NOT EXISTS users (

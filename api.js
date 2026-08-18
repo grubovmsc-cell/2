@@ -6,6 +6,7 @@ const express = require('express');
 const db      = require('./db');
 const { TICKET_TYPES } = require('./ticket-types');
 const { notifyTicketStatus, notifyTicketComment, notifyTicketContractor } = require('./notifier');
+const { DRIVER_COLUMNS, VEHICLE_COLUMNS, importDrivers, importVehicles } = require('./import');
 
 const router = express.Router();
 
@@ -580,17 +581,52 @@ router.get('/tickets/:id', auth, async (req, res) => {
       'SELECT * FROM tickets WHERE id = $1 AND company_id = $2 LIMIT 1',
       [req.params.id, req.account.company_id]
     );
-        [cid, 'TK-' + String(n).padStart(4, '0'), t.type, t.title, t.desc, t.status, t.priority,
-         vIds[t.v], uIds[t.u], t.c != null ? cIds[t.c] : null, t.due || null,
-         JSON.stringify(t.comments || []), JSON.stringify(history), createdAt,
-         t.status === 'DONE' ? iso(Math.max(0, t.days - 1), 15) : null]
-      );
-    }
-
-    res.json({ ok: true, vehicles: vIds.length, drivers: uIds.length, contractors: cIds.length, tickets: n });
+    if (!rows[0]) return res.status(404).json({ error: 'Заявка не найдена' });
+    res.json(rows[0]);
   } catch (err) {
-    console.error('[api] seed-demo error:', err.message);
+    console.error('[api] get ticket error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/tickets/:id', auth, async (req, res) => {
+  try {
+    await db.query('DELETE FROM tickets WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.account.company_id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] delete ticket error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Массовая загрузка из таблицы ──────────────────────────────────────────
+// Описание колонок — фронтенд по нему строит шаблон и разбирает файл
+router.get('/import/columns', auth, (req, res) => {
+  res.json({ drivers: DRIVER_COLUMNS, vehicles: VEHICLE_COLUMNS });
+});
+
+const IMPORT_MAX_ROWS = 1000;
+
+router.post('/import/:kind', auth, async (req, res) => {
+  const kind = req.params.kind;
+  const rows = (req.body || {}).rows;
+
+  if (!['drivers', 'vehicles'].includes(kind))
+    return res.status(400).json({ error: 'Неизвестный тип загрузки' });
+  if (!Array.isArray(rows) || !rows.length)
+    return res.status(400).json({ error: 'В файле нет строк с данными' });
+  if (rows.length > IMPORT_MAX_ROWS)
+    return res.status(400).json({ error: `За раз можно загрузить не больше ${IMPORT_MAX_ROWS} строк` });
+
+  try {
+    const result = kind === 'drivers'
+      ? await importDrivers(req.account.company_id, rows)
+      : await importVehicles(req.account.company_id, rows);
+    res.json(result);
+  } catch (err) {
+    console.error('[api] import error:', err.message);
+    res.status(500).json({ error: 'Не удалось выполнить загрузку' });
   }
 });
 

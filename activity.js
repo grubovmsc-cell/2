@@ -51,6 +51,25 @@ const ACTION_LABELS = {
   ticket_delete:    'Удалена заявка',
   import_drivers:   'Загрузка водителей из файла',
   import_vehicles:  'Загрузка автомобилей из файла',
+
+  // Действия администратора сервиса
+  admin_company_update:   'Админ: изменена компания',
+  admin_company_block:    'Админ: компания заблокирована',
+  admin_company_unblock:  'Админ: компания разблокирована',
+  admin_company_delete:   'Админ: компания удалена',
+  admin_account_create:   'Админ: создан аккаунт',
+  admin_account_update:   'Админ: изменён аккаунт',
+  admin_account_delete:   'Админ: удалён аккаунт',
+  admin_password_reset:   'Админ: сброшен пароль',
+  admin_driver_create:    'Админ: добавлен водитель',
+  admin_driver_update:    'Админ: изменён водитель',
+  admin_driver_delete:    'Админ: удалён водитель',
+  admin_vehicle_create:   'Админ: добавлен автомобиль',
+  admin_vehicle_update:   'Админ: изменён автомобиль',
+  admin_vehicle_delete:   'Админ: удалён автомобиль',
+  admin_contractor_create:'Админ: добавлен подрядчик',
+  admin_contractor_delete:'Админ: удалён подрядчик',
+  admin_ticket_delete:    'Админ: удалена заявка',
 };
 
 module.exports = { log, logLogin, ACTION_LABELS, clientIp };

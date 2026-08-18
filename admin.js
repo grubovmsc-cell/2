@@ -197,7 +197,7 @@ router.get('/overview', adminAuth, async (req, res) => {
 router.get('/companies/:id', adminAuth, async (req, res) => {
   const cid = req.params.id;
   try {
-    const [company, accounts, drivers, vehicles, tickets, log] = await Promise.all([
+    const [company, accounts, drivers, vehicles, tickets, log, contractors, ticketList] = await Promise.all([
       db.query('SELECT * FROM companies WHERE id = $1', [cid]),
       db.query(`SELECT a.id, a.email, a.name, a.created_at,
                   (SELECT MAX(created_at) FROM activity_log
@@ -206,10 +206,20 @@ router.get('/companies/:id', adminAuth, async (req, res) => {
                 FROM accounts a WHERE a.company_id = $1 ORDER BY a.created_at`, [cid]),
       db.query(`SELECT id, name, phone, email, telegram_username, status, telegram_id
                 FROM users WHERE company_id = $1 ORDER BY name`, [cid]),
-      db.query('SELECT id, plate, brand, model, status, mileage FROM vehicles WHERE company_id = $1 ORDER BY plate', [cid]),
+      db.query(`SELECT v.id, v.plate, v.brand, v.model, v.year, v.status, v.mileage,
+                  u.name AS driver_name
+                FROM vehicles v LEFT JOIN users u ON u.id = v.assigned_user_id
+                WHERE v.company_id = $1 ORDER BY v.plate`, [cid]),
       db.query(`SELECT status, COUNT(*)::int AS n FROM tickets WHERE company_id = $1 GROUP BY status`, [cid]),
       db.query(`SELECT actor, action, entity, details, created_at FROM activity_log
                 WHERE company_id = $1 ORDER BY created_at DESC LIMIT 100`, [cid]),
+      db.query('SELECT id, name, phone, contact_person FROM contractors WHERE company_id = $1 ORDER BY name', [cid]),
+      db.query(`SELECT t.id, t.num, t.title, t.status, t.priority, t.created_at,
+                  v.plate, u.name AS driver_name
+                FROM tickets t
+                LEFT JOIN vehicles v ON v.id = t.vehicle_id
+                LEFT JOIN users u ON u.id = t.created_by
+                WHERE t.company_id = $1 ORDER BY t.created_at DESC LIMIT 100`, [cid]),
     ]);
 
     if (!company.rows[0]) return res.status(404).json({ error: 'Компания не найдена' });
@@ -219,6 +229,8 @@ router.get('/companies/:id', adminAuth, async (req, res) => {
       accounts: accounts.rows,
       drivers: drivers.rows,
       vehicles: vehicles.rows,
+      contractors: contractors.rows,
+      tickets: ticketList.rows,
       ticketStats: tickets.rows,
       log: log.rows,
     });
@@ -353,6 +365,157 @@ router.delete('/accounts/:id', adminAuth, async (req, res) => {
     const { rows } = await db.query('DELETE FROM accounts WHERE id = $1 RETURNING email', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Аккаунт не найден' });
     logAdmin(req, 'admin_account_delete', rows[0].email);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Данные компании: водители, автомобили, подрядчики ─────────────────────
+// Админ работает с базовым набором полей — подробные карточки остаются в CRM
+
+const nz = (v) => (v === '' || v === undefined ? null : v);
+const initialsOf = (name) => String(name || '').trim().split(/\s+/)
+  .map(w => w[0] || '').join('').toUpperCase().slice(0, 2);
+const PALETTE = ['#3b82f6', '#a855f7', '#22c55e', '#f97316', '#ef4444', '#10b981'];
+
+router.post('/companies/:id/drivers', adminAuth, async (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Укажите имя' });
+  try {
+    const company = await db.query('SELECT id FROM companies WHERE id = $1', [req.params.id]);
+    if (!company.rows[0]) return res.status(404).json({ error: 'Компания не найдена' });
+
+    const { rows } = await db.query(
+      `INSERT INTO users (company_id, name, phone, email, telegram_username, status, initials, color)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, name`,
+      [req.params.id, b.name, nz(b.phone), nz(b.email),
+       nz(String(b.telegram || '').replace(/^@/, '').trim()),
+       b.status || 'active', initialsOf(b.name),
+       PALETTE[Math.floor(Math.random() * PALETTE.length)]]
+    );
+    logAdmin(req, 'admin_driver_create', b.name);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[admin] create driver error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/drivers/:id', adminAuth, async (req, res) => {
+  const b = req.body || {};
+  try {
+    const { rows } = await db.query(
+      `UPDATE users SET name = COALESCE($1, name), phone = $2, email = $3,
+         telegram_username = $4, status = COALESCE($5, status)
+       WHERE id = $6 RETURNING id, name`,
+      [nz(b.name), nz(b.phone), nz(b.email),
+       nz(String(b.telegram || '').replace(/^@/, '').trim()), nz(b.status), req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Водитель не найден' });
+    logAdmin(req, 'admin_driver_update', rows[0].name);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/drivers/:id', adminAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('DELETE FROM users WHERE id = $1 RETURNING name', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Водитель не найден' });
+    logAdmin(req, 'admin_driver_delete', rows[0].name);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/companies/:id/vehicles', adminAuth, async (req, res) => {
+  const b = req.body || {};
+  if (!b.plate) return res.status(400).json({ error: 'Укажите гос. номер' });
+  try {
+    const company = await db.query('SELECT id FROM companies WHERE id = $1', [req.params.id]);
+    if (!company.rows[0]) return res.status(404).json({ error: 'Компания не найдена' });
+
+    const { rows } = await db.query(
+      `INSERT INTO vehicles (company_id, plate, brand, model, year, status, mileage)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, plate`,
+      [req.params.id, b.plate, nz(b.brand), nz(b.model),
+       b.year ? parseInt(b.year, 10) || null : null,
+       b.status || 'active', b.mileage ? parseInt(b.mileage, 10) || null : null]
+    );
+    logAdmin(req, 'admin_vehicle_create', b.plate);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[admin] create vehicle error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/vehicles/:id', adminAuth, async (req, res) => {
+  const b = req.body || {};
+  try {
+    const { rows } = await db.query(
+      `UPDATE vehicles SET plate = COALESCE($1, plate), brand = $2, model = $3,
+         year = $4, status = COALESCE($5, status), mileage = $6
+       WHERE id = $7 RETURNING id, plate`,
+      [nz(b.plate), nz(b.brand), nz(b.model),
+       b.year ? parseInt(b.year, 10) || null : null, nz(b.status),
+       b.mileage ? parseInt(b.mileage, 10) || null : null, req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Автомобиль не найден' });
+    logAdmin(req, 'admin_vehicle_update', rows[0].plate);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/vehicles/:id', adminAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('DELETE FROM vehicles WHERE id = $1 RETURNING plate', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Автомобиль не найден' });
+    logAdmin(req, 'admin_vehicle_delete', rows[0].plate);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/companies/:id/contractors', adminAuth, async (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Укажите название' });
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO contractors (company_id, name, phone, contact_person)
+       VALUES ($1,$2,$3,$4) RETURNING id, name`,
+      [req.params.id, b.name, nz(b.phone), nz(b.contact_person)]
+    );
+    logAdmin(req, 'admin_contractor_create', b.name);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[admin] create contractor error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/contractors/:id', adminAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('DELETE FROM contractors WHERE id = $1 RETURNING name', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Подрядчик не найден' });
+    logAdmin(req, 'admin_contractor_delete', rows[0].name);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/tickets/:id', adminAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('DELETE FROM tickets WHERE id = $1 RETURNING num', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Заявка не найдена' });
+    logAdmin(req, 'admin_ticket_delete', rows[0].num);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

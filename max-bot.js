@@ -4,9 +4,51 @@
 // работа с HTTP API MAX: получение событий и отправка сообщений.
 // Документация: https://dev.max.ru/docs-api
 'use strict';
+const fs    = require('fs');
+const path  = require('path');
+const tls   = require('tls');
+const https = require('https');
 const conversation = require('./conversation');
 
 const API_BASE = process.env.MAX_API_BASE || 'https://platform-api2.max.ru';
+
+// ─── Сертификаты ───────────────────────────────────────────────────────────
+// API MAX работает по сертификату удостоверяющего центра Минцифры, которого
+// нет в стандартном наборе Node. Кладём файлы .pem или .crt в папку certs/ —
+// они добавятся к системным корневым сертификатам.
+function buildAgent() {
+  const dir = path.join(__dirname, 'certs');
+  let extra = [];
+  try {
+    extra = fs.readdirSync(dir)
+      .filter(f => /\.(pem|crt|cer)$/i.test(f))
+      .map(f => fs.readFileSync(path.join(dir, f), 'utf8'));
+  } catch (_) { /* папки нет — работаем на системных сертификатах */ }
+
+  if (extra.length) {
+    console.log(`[max] Загружено дополнительных сертификатов: ${extra.length}`);
+    return new https.Agent({ ca: [...tls.rootCertificates, ...extra], keepAlive: true });
+  }
+  return new https.Agent({ keepAlive: true });
+}
+
+const agent = buildAgent();
+
+// Запрос через https напрямую — так можно передать свои сертификаты
+function httpsRequest(url, { method, headers, body, timeout }) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method, headers, agent, timeout: timeout || 60000 }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, text: data }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('Превышено время ожидания ответа')); });
+    if (body) req.write(body);
+    req.end();
+  });
+}
 
 // Сессии держим в памяти, как и в Telegram: при перезапуске водитель
 // восстанавливается из базы по идентификатору аккаунта
@@ -24,32 +66,37 @@ class MaxBot {
     this.info = null;
   }
 
-  async request(method, path, { query = {}, body } = {}) {
-    const url = new URL(API_BASE + path);
+  async request(method, endpoint, { query = {}, body } = {}) {
+    const url = new URL(API_BASE + endpoint);
     Object.entries(query).forEach(([k, v]) => {
       if (v !== undefined && v !== null) url.searchParams.set(k, v);
     });
 
+    const payload = body ? JSON.stringify(body) : null;
     let res;
     try {
-      res = await fetch(url, {
+      res = await httpsRequest(url, {
         method,
-        headers: { 'Authorization': this.token, 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
+        headers: {
+          'Authorization': this.token,
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+        },
+        body: payload,
+        // long polling ждёт события до 30 секунд — даём запас
+        timeout: endpoint === '/updates' ? 60000 : 20000,
       });
     } catch (err) {
-      // fetch прячет причину внутрь cause — без неё непонятно, что случилось
-      const cause = err.cause || {};
-      const detail = [cause.code, cause.message].filter(Boolean).join(' ');
-      // не доверяем сертификату / домен недоступен / соединение отклонено
-      throw new Error(`${err.message}${detail ? ' — ' + detail : ''} (${url.host})`);
+      const hint = err.code === 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'
+        ? ' — нет доверия к сертификату MAX. Положите сертификаты Минцифры в папку certs/'
+        : '';
+      throw new Error(`${err.code || ''} ${err.message}${hint} (${url.host})`.trim());
     }
 
-    const text = await res.text();
     let data = null;
-    try { data = text ? JSON.parse(text) : null; } catch (_) {}
+    try { data = res.text ? JSON.parse(res.text) : null; } catch (_) {}
 
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
       throw new Error(msg);
     }

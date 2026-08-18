@@ -309,6 +309,27 @@ async function initSchema() {
     FOR EACH ROW EXECUTE FUNCTION set_updated_at()
   `);
 
+  // ── Выравнивание связей водитель↔автомобиль ─────────────────
+  // Привязка хранится с двух сторон и раньше могла разойтись: например,
+  // в карточке машины водитель указан, а у водителя машины нет.
+  // Заполняем только пустую сторону, ничего не перезаписывая.
+  const fixA = await db.query(`
+    UPDATE users u SET assigned_vehicle = v.id
+    FROM vehicles v
+    WHERE v.assigned_user_id = u.id
+      AND v.company_id = u.company_id
+      AND u.assigned_vehicle IS NULL
+  `);
+  const fixB = await db.query(`
+    UPDATE vehicles v SET assigned_user_id = u.id
+    FROM users u
+    WHERE u.assigned_vehicle = v.id
+      AND v.company_id = u.company_id
+      AND v.assigned_user_id IS NULL
+  `);
+  const fixed = (fixA.rowCount || 0) + (fixB.rowCount || 0);
+  if (fixed) console.log(`[schema] Восстановлено связей водитель↔автомобиль: ${fixed}`);
+
   console.log('[schema] ✅ Schema ready.');
 }
 

@@ -76,10 +76,30 @@ module.exports = {
     );
   },
 
+  // В карточку часто попадают лишние пробелы — сравниваем без них
   async getUserByEmail(email) {
     const { rows } = await pool.query(
-      'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
-      [email]
+      `SELECT * FROM users
+       WHERE BTRIM(LOWER(COALESCE(email, ''))) = BTRIM(LOWER($1))
+         AND BTRIM($1) <> '' LIMIT 1`,
+      [String(email || '')]
+    );
+    return rows[0] || null;
+  },
+
+  // Запасной способ привязки: водитель ввёл телефон вместо почты.
+  // Сравниваем только цифры, чтобы формат записи не мешал.
+  async getUserByPhone(phone) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 10) return null;
+    // Мобильные пишут и с 8, и с +7 — сравниваем по последним 10 цифрам
+    const tail = digits.slice(-10);
+    const { rows } = await pool.query(
+      `SELECT * FROM users
+       WHERE RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g'), 10) = $1
+         AND LENGTH(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g')) >= 10
+       LIMIT 1`,
+      [tail]
     );
     return rows[0] || null;
   },

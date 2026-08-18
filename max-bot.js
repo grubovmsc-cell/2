@@ -4,10 +4,11 @@
 // работа с HTTP API MAX: получение событий и отправка сообщений.
 // Документация: https://dev.max.ru/docs-api
 'use strict';
-const fs    = require('fs');
-const path  = require('path');
-const tls   = require('tls');
-const https = require('https');
+const fs     = require('fs');
+const path   = require('path');
+const tls    = require('tls');
+const https  = require('https');
+const crypto = require('crypto');
 const conversation = require('./conversation');
 
 const API_BASE = process.env.MAX_API_BASE || 'https://platform-api2.max.ru';
@@ -108,10 +109,14 @@ class MaxBot {
   // ─── Отправка ────────────────────────────────────────────────────────────
   // В MAX нет постоянной клавиатуры внизу экрана, поэтому главное меню
   // показываем кнопками под сообщением
-  async sendMessage(userId, text, { markdown, buttons, menu } = {}) {
+  async sendMessage(userId, text, { markdown, buttons, menu, requestContact } = {}) {
     const attachments = [];
 
     let keyboard = buttons;
+    // Кнопка запроса контакта: MAX сам подставит номер пользователя
+    if (requestContact) {
+      keyboard = [[{ text: '📱 Поделиться номером', requestContact: true }], ...(keyboard || [])];
+    }
     if (!keyboard && menu) {
       keyboard = [];
       for (let i = 0; i < conversation.MENU.length; i += 2) {
@@ -124,9 +129,11 @@ class MaxBot {
       attachments.push({
         type: 'inline_keyboard',
         payload: {
-          buttons: keyboard.map(row => row.map(b => b.url
-            ? { type: 'link', text: b.text, url: b.url }
-            : { type: 'callback', text: b.text, payload: b.data })),
+          buttons: keyboard.map(row => row.map(b => {
+            if (b.requestContact) return { type: 'request_contact', text: b.text };
+            if (b.url) return { type: 'link', text: b.text, url: b.url };
+            return { type: 'callback', text: b.text, payload: b.data };
+          })),
         },
       });
     }
@@ -162,6 +169,7 @@ class MaxBot {
 
       const text = isCallback ? '' : (update.message?.body?.text || '');
       const isStart = type === 'bot_started' || /^\/start\b/.test(text);
+      const phone = isCallback ? null : this.extractPhone(update.message);
 
       const input = {
         channel:   'max',
@@ -170,6 +178,7 @@ class MaxBot {
         firstName: from.name ? String(from.name).split(' ')[0] : null,
         text:      isStart ? '' : text,
         callback:  isCallback ? update.callback.payload : null,
+        phone,
         isStart,
         session,
       };
@@ -197,9 +206,43 @@ class MaxBot {
     if (type === 'bot_stopped' && update.user) sessions.delete(update.user.user_id);
   }
 
+  // ─── Контакт водителя ────────────────────────────────────────────────────
+  // Номер приходит вложением type=contact. Поле hash подтверждает, что это
+  // действительно номер владельца аккаунта, а не пересланная визитка.
+  extractPhone(message) {
+    const contact = (message?.body?.attachments || []).find(a => a.type === 'contact');
+    if (!contact) return null;
+
+    const payload = contact.payload || {};
+    const vcf = payload.vcf_info || '';
+
+    // Проверяем подлинность: hash = HMAC-SHA256(токен бота, vcf_info)
+    if (payload.hash && vcf) {
+      const expected = crypto.createHmac('sha256', this.token)
+        .update(vcf.replace(/\\r\\n/g, '\r\n'))
+        .digest('hex');
+      if (expected !== payload.hash) {
+        console.warn('[max] контакт без подтверждения подлинности — игнорируем');
+        return null;
+      }
+    }
+
+    // Номер лежит в строке вида "TEL;TYPE=cell:79990000000"
+    const fromVcf = vcf.match(/TEL[^:]*:\+?(\d[\d\s()-]{9,})/);
+    if (fromVcf) return fromVcf[1].replace(/\D/g, '');
+
+    const info = payload.max_info || {};
+    if (info.phone) return String(info.phone).replace(/\D/g, '');
+
+    return null;
+  }
+
   toMessageBody(r) {
     const body = { text: r.text.slice(0, 4000) };
     if (r.markdown) body.format = 'markdown';
+    if (r.requestContact) {
+      r = { ...r, buttons: [[{ text: '📱 Поделиться номером', requestContact: true }], ...(r.buttons || [])] };
+    }
     if (r.buttons && r.buttons.length) {
       body.attachments = [{
         type: 'inline_keyboard',

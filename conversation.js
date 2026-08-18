@@ -100,21 +100,20 @@ async function handle(input) {
     s.step = null; s.editingField = null; s.replyTicketId = null;
   }
 
-  // ── Не нашли водителя: просим e-mail ──
+  // ── Не нашли водителя ──
   if (!s.userId) {
-    if (s.step === 'await_email') return linkByEmail(input, s, text);
+    // Водитель поделился контактом — самый надёжный способ: номер
+    // подтверждён самим мессенджером, подделать его нельзя
+    if (input.phone) return linkByPhone(input, s);
+
+    if (s.step === 'await_email') return linkByContact(input, s, text);
+
     if (input.isStart || !text) {
       s.step = 'await_email';
-      return [reply(
-        `👋 Привет, ${input.firstName || 'Водитель'}!\n\n` +
-        `Я бот FleetDesk — системы управления автопарком.\n\n` +
-        `Не нашёл вас по нику в базе. Проверьте у диспетчера, что в вашей карточке ` +
-        `указан ник ${input.username ? '@' + input.username : 'вашего аккаунта'}, ` +
-        `либо введите рабочий e-mail для привязки:`
-      )];
+      return [reply(greeting(input), { requestContact: input.channel === 'max' })];
     }
     s.step = 'await_email';
-    return linkByEmail(input, s, text);
+    return linkByContact(input, s, text);
   }
 
   // ── Начало работы ──
@@ -153,22 +152,71 @@ async function handle(input) {
   return [reply('Выберите действие:', { menu: true })];
 }
 
-// ─── Привязка по e-mail ────────────────────────────────────────────────────
-async function linkByEmail(input, s, text) {
-  const user = await db.getUserByEmail(text.toLowerCase());
-  if (!user) {
-    return [reply(
-      `❌ Пользователь с таким e-mail не найден в системе.\n` +
-      `Попробуйте ещё раз или обратитесь к вашему диспетчеру.`
-    )];
+// ─── Привязка аккаунта ─────────────────────────────────────────────────────
+function greeting(input) {
+  const base = `👋 Привет, ${input.firstName || 'Водитель'}!\n\n` +
+    `Я бот FleetDesk — системы управления автопарком.\n\n`;
+
+  // В MAX ник есть не у каждого, поэтому основной способ — подтверждённый
+  // номер телефона: он же указан в карточке водителя
+  if (input.channel === 'max') {
+    return base +
+      `Чтобы я вас узнал, нажмите кнопку ниже и поделитесь номером телефона — ` +
+      `он должен совпадать с указанным в вашей карточке.\n\n` +
+      `Если номер не подходит, отправьте рабочий e-mail сообщением.`;
   }
+  return base +
+    `Не нашёл вас по нику в базе. Проверьте у диспетчера, что в вашей карточке ` +
+    `указан ник ${input.username ? '@' + input.username : 'вашего аккаунта'}, ` +
+    `либо отправьте рабочий e-mail или телефон для привязки:`;
+}
+
+async function linkUser(input, s, user) {
   if (input.channel === 'max') await db.linkMax(user.id, input.userId, input.username);
   else await db.linkTelegram(user.id, input.userId, input.username);
 
   s.userId = user.id;
   s.companyId = user.company_id;
   s.step = null;
-  return [reply(`✅ Аккаунт привязан! Добро пожаловать, ${user.name}.\n\nВыберите действие в меню ниже:`, { menu: true })];
+  return [reply(
+    `✅ Аккаунт привязан! Добро пожаловать, ${user.name}.\n\nВыберите действие в меню ниже:`,
+    { menu: true }
+  )];
+}
+
+// Номер пришёл кнопкой «Поделиться контактом»
+async function linkByPhone(input, s) {
+  const user = await db.getUserByPhone(input.phone);
+  if (!user) {
+    return [reply(
+      `❌ Номер ${input.phone} не найден в системе.\n\n` +
+      `Попросите диспетчера указать этот номер в вашей карточке водителя — ` +
+      `после этого нажмите кнопку ещё раз.`,
+      { requestContact: input.channel === 'max' }
+    )];
+  }
+  return linkUser(input, s, user);
+}
+
+// Водитель ввёл текстом: это может быть e-mail или номер телефона
+async function linkByContact(input, s, text) {
+  const looksLikePhone = /^[\d\s()+-]{10,20}$/.test(text);
+
+  const user = looksLikePhone
+    ? await db.getUserByPhone(text)
+    : await db.getUserByEmail(text);
+
+  if (!user) {
+    console.log(`[bot] не найден водитель по «${text}» (${input.channel})`);
+    return [reply(
+      looksLikePhone
+        ? `❌ Водитель с таким номером не найден.\nПроверьте номер или обратитесь к диспетчеру.`
+        : `❌ Пользователь с таким e-mail не найден в системе.\n` +
+          `Попробуйте ещё раз, отправьте номер телефона или обратитесь к вашему диспетчеру.`,
+      { requestContact: input.channel === 'max' }
+    )];
+  }
+  return linkUser(input, s, user);
 }
 
 // ─── Новая заявка ──────────────────────────────────────────────────────────

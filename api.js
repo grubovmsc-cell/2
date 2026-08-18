@@ -288,8 +288,9 @@ function driverValues(body) {
     status:            body.status || 'active',
     initials:          body.initials || initialsOf(body.name),
     color:             body.color || pickColor(),
-    telegram_username: nz(String(body.telegram || body.telegram_username || '').replace(/^@/, '').trim()),
-    max_username:      nz(String(body.max || body.max_username || '').replace(/^@/, '').trim()),
+    // Пустое поле осознанно стирает ник, поэтому ?? , а не ||
+    telegram_username: nz(String(body.telegram ?? body.telegram_username ?? '').replace(/^@/, '').trim()),
+    max_username:      nz(String(body.max ?? body.max_username ?? '').replace(/^@/, '').trim()),
     license_number:    nz(body.license_number),
     license_category:  nz(body.license_category),
     license_expires:   nz(body.license_expires),

@@ -524,8 +524,8 @@ router.post('/tickets', auth, async (req, res) => {
     const history = [{ from: null, to: 'NEW', time: new Date().toISOString(), who: null }];
     const { rows } = await db.query(
       `INSERT INTO tickets (company_id, num, type_key, title, description, status, priority,
-         vehicle_id, created_by, contractor_id, due, comments, history)
-       VALUES ($1,$2,$3,$4,$5,'NEW',$6,$7,$8,$9,$10,'[]'::jsonb,$11) RETURNING *`,
+         vehicle_id, created_by, contractor_id, due, comments, history, channel)
+       VALUES ($1,$2,$3,$4,$5,'NEW',$6,$7,$8,$9,$10,'[]'::jsonb,$11,'crm') RETURNING *`,
       [cid, num, b.type || 'other', nz(b.title), nz(b.desc || b.description),
        b.priority || 'MEDIUM', nz(b.vehicleId || b.vehicle_id),
        nz(b.userId || b.created_by), nz(b.contractorId || b.contractor_id),
@@ -634,6 +634,12 @@ router.delete('/tickets/:id', auth, async (req, res) => {
 // Описание колонок — фронтенд по нему строит шаблон и разбирает файл
 router.get('/import/columns', auth, (req, res) => {
   res.json({ drivers: DRIVER_COLUMNS, vehicles: VEHICLE_COLUMNS });
+});
+
+// Список каналов связи — CRM подписывает ими заявки
+router.get('/channels', auth, (req, res) => {
+  const { CHANNELS } = require('./channels');
+  res.json(CHANNELS);
 });
 
 const IMPORT_MAX_ROWS = 1000;

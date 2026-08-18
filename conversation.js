@@ -136,7 +136,7 @@ async function handle(input) {
   }
 
   // ── Шаги диалога ──
-  if (s.step === 'new_ticket_desc')  return createTicket(s, text);
+  if (s.step === 'new_ticket_desc')  return createTicket(s, text, input.channel);
   if (s.step === 'profile_value')    return saveProfileValue(s, text);
   if (s.step === 'reply_comment')    return saveReply(s, text);
 
@@ -273,7 +273,7 @@ function describeTicket(s, vehicleId) {
   return [edit('✏️ Опишите проблему или задачу (текстом):')];
 }
 
-async function createTicket(s, text) {
+async function createTicket(s, text, channel) {
   const num = await db.getNextTicketNum(s.companyId);
   const ticket = await db.createTicket({
     company_id:  s.companyId,
@@ -282,6 +282,7 @@ async function createTicket(s, text) {
     vehicle_id:  s.pendingTicket.vehicleId,
     description: text,
     created_by:  s.userId,
+    channel,                    // сюда же вернутся статусы и комментарии
     num,
   });
   s.step = null;

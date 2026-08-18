@@ -235,6 +235,8 @@ async function initSchema() {
     )
   `);
   await addColumns('tickets', {
+    // Откуда пришла заявка — туда же уходит вся обратная связь
+    channel:  "TEXT NOT NULL DEFAULT 'crm'",
     type_key: "TEXT NOT NULL DEFAULT 'other'",
     title:    'TEXT',
     priority: "TEXT NOT NULL DEFAULT 'MEDIUM'",

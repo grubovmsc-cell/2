@@ -215,6 +215,7 @@ router.post('/tickets', driverAuth, async (req, res) => {
       description: String(b.description || b.title).trim().slice(0, 2000),
       vehicle_id:  veh[0] ? veh[0].id : null,
       created_by:  req.driver.id,
+      channel:     'cabinet',   // из кабинета — уведомим любым доступным способом
       num,
     });
     res.json({ ok: true, num: ticket.num, id: ticket.id });

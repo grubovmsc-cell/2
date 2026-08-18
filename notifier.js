@@ -3,53 +3,63 @@
 // сообщение уходит везде, где он есть.
 'use strict';
 const db = require('./db');
+const { CHANNELS, BOT_CHANNELS, availableFor } = require('./channels');
 
-let bot = null;      // Telegram
-let maxBot = null;   // MAX
+// Отправители по каналам: ключ → функция (externalId, text, opts)
+const senders = new Map();
 
-const setBot    = (instance) => { bot = instance; };
-const setMaxBot = (instance) => { maxBot = instance; };
+const registerSender = (channel, fn) => { senders.set(channel, fn); };
+
+// Совместимость с прежними вызовами
+const setBot = (bot) => {
+  registerSender('telegram', (chatId, text, { buttons } = {}) => {
+    const extra = { parse_mode: 'Markdown' };
+    if (buttons) {
+      extra.reply_markup = {
+        inline_keyboard: buttons.map(row => row.map(b =>
+          b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data })),
+      };
+    }
+    return bot.telegram.sendMessage(chatId, text, extra);
+  });
+};
+
+const setMaxBot = (maxBot) => {
+  registerSender('max', (userId, text, { buttons } = {}) =>
+    maxBot.sendMessage(userId, text, { markdown: true, buttons }));
+};
 
 const STATUS_LABELS = {
   NEW: '🆕 Новая', IN_PROGRESS: '🔧 В работе',
   WAITING: '⏳ Ожидание', DONE: '✅ Завершена', CANCELLED: '❌ Отменена',
 };
 
-// Единая точка отправки: сама разбирается, куда доставить
-async function sendToUser(userId, text, buttons) {
+// Единая точка отправки.
+// prefer — канал, из которого пришла заявка: отвечаем туда же, где водитель
+// начал разговор. Если он там больше не подключён, доставляем куда сможем.
+async function sendToUser(userId, text, { buttons, prefer } = {}) {
+  const fields = BOT_CHANNELS.map(c => c.idField).join(', ');
   const { rows } = await db.query(
-    'SELECT telegram_id, max_id FROM users WHERE id = $1', [userId]
+    `SELECT ${fields} FROM users WHERE id = $1`, [userId]
   );
   const u = rows[0];
   if (!u) return 0;
 
+  const available = availableFor(u).filter(c => senders.has(c.key));
+  if (!available.length) return 0;
+
+  const preferred = prefer && available.find(c => c.key === prefer);
+  const targets = preferred ? [preferred] : available;
+
   let sent = 0;
-
-  if (bot && u.telegram_id) {
+  for (const channel of targets) {
     try {
-      const extra = { parse_mode: 'Markdown' };
-      if (buttons) {
-        extra.reply_markup = {
-          inline_keyboard: buttons.map(row => row.map(b =>
-            b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data })),
-        };
-      }
-      await bot.telegram.sendMessage(u.telegram_id, text, extra);
+      await senders.get(channel.key)(u[channel.idField], text, { buttons });
       sent++;
     } catch (err) {
-      console.error('[notifier] telegram error:', err.message);
+      console.error(`[notifier] ${channel.key} error:`, err.message);
     }
   }
-
-  if (maxBot && u.max_id) {
-    try {
-      await maxBot.sendMessage(u.max_id, text, { markdown: true, buttons });
-      sent++;
-    } catch (err) {
-      console.error('[notifier] max error:', err.message);
-    }
-  }
-
   return sent;
 }
 
@@ -68,7 +78,7 @@ async function notifyTicketStatus(ticket, newStatus) {
     `${full.description ? full.description.slice(0, 100) : ''}`;
 
   let sent = 0;
-  for (const uid of recipients) sent += await sendToUser(uid, text);
+  for (const uid of recipients) sent += await sendToUser(uid, text, { prefer: full.channel });
   return sent;
 }
 
@@ -82,8 +92,10 @@ async function notifyTicketComment(ticket, comment) {
     `${full.type_icon || ''} ${full.title || full.type_name || ''}\n\n` +
     `_${comment.author || 'Диспетчер'}:_\n${comment.text}`;
 
-  return sendToUser(ticket.created_by, text,
-    [[{ text: '✍️ Ответить', data: `reply:${ticket.id}` }]]);
+  return sendToUser(ticket.created_by, text, {
+    buttons: [[{ text: '✍️ Ответить', data: `reply:${ticket.id}` }]],
+    prefer: full.channel,
+  });
 }
 
 // ─── Назначен подрядчик ────────────────────────────────────────────────────
@@ -110,11 +122,11 @@ async function notifyTicketContractor(ticket, contractorId) {
   if (c.work_hours)     lines.push(`🕒 Часы работы: ${c.work_hours}`);
   if (c.notes)          lines.push('', `_${c.notes}_`);
 
-  return sendToUser(ticket.created_by, lines.join('\n'));
+  return sendToUser(ticket.created_by, lines.join('\n'), { prefer: full.channel });
 }
 
 module.exports = {
-  setBot, setMaxBot, sendToUser,
+  setBot, setMaxBot, registerSender, sendToUser,
   notifyTicketStatus, notifyTicketComment, notifyTicketContractor,
-  STATUS_LABELS,
+  STATUS_LABELS, CHANNELS,
 };

@@ -186,11 +186,12 @@ module.exports = {
     const history = [{ from: null, to: 'NEW', time: new Date().toISOString(), who: data.created_by }];
     const { rows } = await pool.query(
       `INSERT INTO tickets (company_id, type_key, title, vehicle_id, description, status,
-         priority, created_by, num, comments, history, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'NEW', 'MEDIUM', $6, $7, '[]'::jsonb, $8, NOW())
+         priority, created_by, num, comments, history, channel, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'NEW', 'MEDIUM', $6, $7, '[]'::jsonb, $8, $9, NOW())
        RETURNING *`,
       [data.company_id, data.type_key || 'other', data.title || null, data.vehicle_id,
-       data.description, data.created_by, data.num, JSON.stringify(history)]
+       data.description, data.created_by, data.num, JSON.stringify(history),
+       data.channel || 'crm']
     );
     return withTypeInfo(rows[0]);
   },

@@ -89,8 +89,8 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Требуется авторизация' });
   try {
     const { rows } = await db.query(
-      `SELECT a.id, a.company_id, a.email, a.name, a.initials, c.name AS company_name,
-              c.blocked_at, s.last_used_at
+      `SELECT a.id, a.company_id, a.email, a.name, a.initials, a.role,
+              c.name AS company_name, c.blocked_at, s.last_used_at
        FROM sessions s
        JOIN accounts a ON a.id = s.account_id
        JOIN companies c ON c.id = a.company_id
@@ -141,7 +141,7 @@ async function createSession(accountId) {
 
 const accountPayload = (a, token) => ({
   token,
-  account: { id: a.id, email: a.email, name: a.name, initials: a.initials },
+  account: { id: a.id, email: a.email, name: a.name, initials: a.initials, role: a.role || 'owner' },
   company: { id: a.company_id, name: a.company_name },
 });
 
@@ -161,15 +161,15 @@ router.post('/auth/register', async (req, res) => {
     await db.query('INSERT INTO companies (id, name, slug) VALUES ($1, $2, $1)', [companyId, companyName]);
 
     const { rows } = await db.query(
-      `INSERT INTO accounts (company_id, email, password_hash, name, initials)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      `INSERT INTO accounts (company_id, email, password_hash, name, initials, role, activated_at)
+       VALUES ($1, $2, $3, $4, $5, 'owner', NOW()) RETURNING id`,
       [companyId, email, hashPassword(password), name, initialsOf(name)]
     );
 
     const token = await createSession(rows[0].id);
     const account = {
       id: rows[0].id, company_id: companyId, email, name,
-      initials: initialsOf(name), company_name: companyName,
+      initials: initialsOf(name), company_name: companyName, role: 'owner',
     };
     req.account = account;
     activity.log(req, 'register', { entity: 'company', entityId: companyId, details: companyName });
@@ -219,6 +219,56 @@ router.post('/auth/login', async (req, res) => {
   }
 });
 
+// ─── Приглашение сотрудника ────────────────────────────────────────────────
+// Проверка ссылки: показываем, в какую компанию и с какой ролью зовут
+router.get('/auth/invite/:token', async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT a.name, a.email, a.role, c.name AS company_name
+       FROM accounts a JOIN companies c ON c.id = a.company_id
+       WHERE a.invite_token = $1 AND a.invite_expires > NOW() AND a.password_hash IS NULL
+       LIMIT 1`,
+      [req.params.token]
+    );
+    if (!rows[0])
+      return res.status(404).json({ error: 'Ссылка недействительна или уже использована' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Сотрудник задаёт себе пароль и сразу попадает в систему
+router.post('/auth/invite/:token', async (req, res) => {
+  const { password } = req.body || {};
+  if (!password || String(password).length < 6)
+    return res.status(400).json({ error: 'Пароль минимум 6 символов' });
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE accounts SET password_hash = $1, invite_token = NULL,
+         invite_expires = NULL, activated_at = NOW()
+       WHERE invite_token = $2 AND invite_expires > NOW() AND password_hash IS NULL
+       RETURNING id, company_id, email, name, initials, role`,
+      [hashPassword(password), req.params.token]
+    );
+    if (!rows[0])
+      return res.status(404).json({ error: 'Ссылка недействительна или уже использована' });
+
+    const acc = rows[0];
+    const company = await db.query('SELECT name FROM companies WHERE id = $1', [acc.company_id]);
+    const token = await createSession(acc.id);
+
+    req.account = acc;
+    activity.log(req, 'invite_accepted', { details: acc.email });
+
+    res.json(accountPayload({ ...acc, company_name: company.rows[0]?.name }, token));
+  } catch (err) {
+    console.error('[api] accept invite error:', err.message);
+    res.status(500).json({ error: 'Не удалось активировать аккаунт' });
+  }
+});
+
 router.post('/auth/logout', auth, async (req, res) => {
   const token = req.headers.authorization.slice(7);
   await db.query('DELETE FROM sessions WHERE token = $1', [token]).catch(() => {});
@@ -228,10 +278,13 @@ router.post('/auth/logout', auth, async (req, res) => {
 router.get('/auth/me', auth, (req, res) => {
   const a = req.account;
   res.json({
-    account: { id: a.id, email: a.email, name: a.name, initials: a.initials },
+    account: { id: a.id, email: a.email, name: a.name, initials: a.initials, role: a.role },
     company: { id: a.company_id, name: a.company_name },
   });
 });
+
+// Настройки компании, профиля и команды
+router.use('/settings', auth, require('./settings').router);
 
 // ─── Все данные компании одним запросом ────────────────────────────────────
 // Заявок со временем накапливаются тысячи — отдаём последние N,
@@ -445,7 +498,9 @@ router.delete('/vehicles/:id', auth, async (req, res) => {
 
 // ─── Подрядчики ────────────────────────────────────────────────────────────
 const CONTRACTOR_FIELDS = ['name', 'phone', 'contact_person', 'email', 'website',
-  'address', 'work_hours', 'notes', 'specializations'];
+  'address', 'work_hours', 'notes', 'specializations',
+  'contract_number', 'contract_date', 'contract_until',
+  'payment_type', 'payment_days', 'payment_note'];
 
 function contractorValues(body) {
   let site = String(body.website || '').trim();
@@ -461,6 +516,12 @@ function contractorValues(body) {
     work_hours:      nz(body.work_hours),
     notes:           nz(body.notes),
     specializations: JSON.stringify(Array.isArray(body.specializations) ? body.specializations : []),
+    contract_number: nz(body.contract_number),
+    contract_date:   nz(body.contract_date),
+    contract_until:  nz(body.contract_until),
+    payment_type:    nz(body.payment_type),
+    payment_days:    int(body.payment_days),
+    payment_note:    nz(body.payment_note),
   };
 }
 

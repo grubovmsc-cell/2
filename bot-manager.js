@@ -9,6 +9,7 @@ const { router: apiRouter } = require('./api');
 const { router: driverRouter } = require('./driver');
 const { router: adminRouter, ensureFirstAdmin } = require('./admin');
 const notifier = require('./notifier');
+const { startEscalation } = require('./escalation');
 
 const { MaxBot } = require('./max-bot');
 
@@ -199,6 +200,7 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
   await ensureFirstAdmin();
   await startBot();
   await startMaxBot();
+  startEscalation();
   app.listen(NOTIFY_PORT, () => {
     console.log(`[manager] HTTP API listening on port ${NOTIFY_PORT}`);
     console.log(`  /api/auth/*         — регистрация, вход, сессия`);

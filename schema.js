@@ -96,6 +96,40 @@ async function initSchema() {
   // Блокировка компании — обратимая альтернатива удалению
   await addColumns('companies', { blocked_at: 'TIMESTAMPTZ', note: 'TEXT' });
 
+  // Реквизиты компании — заполняются в разделе «Настройки»
+  await addColumns('companies', {
+    legal_name:     'TEXT',   // полное юридическое название
+    inn:            'TEXT',
+    kpp:            'TEXT',
+    ogrn:           'TEXT',
+    legal_address:  'TEXT',
+    office_address: 'TEXT',
+    phone:          'TEXT',
+    email:          'TEXT',
+    website:        'TEXT',
+    director:       'TEXT',
+  });
+
+  // Роли и приглашения сотрудников
+  await addColumns('accounts', {
+    role:            "TEXT NOT NULL DEFAULT 'admin'",  // owner | admin | dispatcher | viewer
+    invite_token:    'TEXT',
+    invite_expires:  'TIMESTAMPTZ',
+    invited_by:      'UUID',
+    activated_at:    'TIMESTAMPTZ',
+  });
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_accounts_invite ON accounts(invite_token)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_accounts_company ON accounts(company_id)`);
+  // password_hash пустой у приглашённых, пока они не задали пароль
+  await db.query(`ALTER TABLE accounts ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
+  // Первый аккаунт компании — владелец
+  await db.query(`
+    UPDATE accounts a SET role = 'owner'
+    WHERE role = 'admin' AND NOT EXISTS (
+      SELECT 1 FROM accounts b WHERE b.company_id = a.company_id AND b.created_at < a.created_at
+    )
+  `).catch(() => {});
+
   // ── Личный кабинет водителя ─────────────────────────────────
   // Токен выдаёт бот — личность водителя уже подтверждена Telegram
   await db.query(`
@@ -215,6 +249,13 @@ async function initSchema() {
     address:         'TEXT',
     notes:           'TEXT',
     work_hours:      'TEXT',
+    // Договор с подрядчиком
+    contract_number:  'TEXT',
+    contract_date:    'DATE',
+    contract_until:   'DATE',
+    payment_type:     'TEXT',      // prepay | postpay | other
+    payment_days:     'INTEGER',   // срок отсрочки в днях
+    payment_note:     'TEXT',
   });
   await db.query(`CREATE INDEX IF NOT EXISTS idx_contractors_company ON contractors(company_id)`);
 

@@ -79,6 +79,8 @@ const ACTION_LABELS = {
   admin_contractor_create:'Админ: добавлен подрядчик',
   admin_contractor_delete:'Админ: удалён подрядчик',
   admin_ticket_delete:    'Админ: удалена заявка',
+  admin_backup_export:    'Админ: выгрузка резервной копии',
+  admin_backup_import:    'Админ: восстановление из копии',
 };
 
 module.exports = { log, logLogin, ACTION_LABELS, clientIp };

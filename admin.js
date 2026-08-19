@@ -522,6 +522,43 @@ router.delete('/tickets/:id', adminAuth, async (req, res) => {
   }
 });
 
+// ─── Резервное копирование ─────────────────────────────────────────────────
+const backup = require('./backup');
+
+router.get('/backup/export', adminAuth, async (req, res) => {
+  try {
+    const data = await backup.exportAll();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+
+    logAdmin(req, 'admin_backup_export',
+      Object.entries(data.summary).map(([t, n]) => `${t}:${n}`).join(', '));
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="fleetdesk-backup-${stamp}.json"`);
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('[admin] backup export error:', err.message);
+    res.status(500).json({ error: 'Не удалось выгрузить данные' });
+  }
+});
+
+router.post('/backup/import', adminAuth, async (req, res) => {
+  const { data, mode } = req.body || {};
+  if (!data) return res.status(400).json({ error: 'Файл не передан' });
+  if (mode === 'replace' && (req.body.confirm !== 'REPLACE'))
+    return res.status(400).json({ error: 'Полная замена не подтверждена' });
+
+  try {
+    const result = await backup.importAll(data, mode === 'replace' ? 'replace' : 'merge');
+    logAdmin(req, 'admin_backup_import',
+      `${result.mode}: ` + Object.entries(result.restored).map(([t, n]) => `${t}:${n}`).join(', '));
+    res.json(result);
+  } catch (err) {
+    console.error('[admin] backup import error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Журнал ────────────────────────────────────────────────────────────────
 router.get('/activity', adminAuth, async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit, 10) || 100, 500);
